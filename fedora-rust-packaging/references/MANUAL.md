@@ -121,7 +121,7 @@ hold:
 | `copr CRATE…\|--all --project P [-r CHROOT]… [-n] [--wait]` | Submit to COPR. Each stage is chained after the previous one with `--after-build-id`. With `--wait`, watch the builds until they finish and fail if any failed. |
 | `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
 | `review-request CRATE…\|--all --project P --fas NAME [-r CHROOT] [--needs-sponsor] [--comment TEXT] [--koji-task CRATE=TASK]… [--file]` | Prepare the Bugzilla review request of each package, in dependency order, from its latest succeeded COPR build (chroot default `fedora-rawhide-x86_64`). Requires a passing `review` of the current SRPM and a published spec identical to the local one. Writes `review-request.txt`. `--koji-task` adds a link to a successful Koji scratch build of that crate's SRPM (checked through Koji). With `--file`, files it (or, if already filed, posts the new Spec/SRPM URLs) and records the bug in `review-request.json`. See "Submitting to Fedora". |
-| `review-status CRATE…\|--all [--comments N] [--record]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. |
+| `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…]` | Show packaged version vs. crates.io vs. Fedora, and whether a patch and an SRPM exist. |
 
@@ -271,6 +271,15 @@ Steps:
 5. `review-status --all` shows where each ticket stands and the next step;
    run it regularly while the reviews are open. It prints comments from people
    that came after your last comment, and open NEEDINFO requests.
+   Tickets not tied to a local package (other packages of yours, or someone
+   else's) are followed with `review-status --user <Bugzilla login>`. Its
+   state lives in `~/.cache/rust-packaging-tools/review-status/<login>/`:
+   `state.json` (status, flag, reviewer and comment count per ticket at the
+   last check) and `<bug>-<package>.txt` (each full thread). The next run
+   says what changed since, marks new comments `[new]`, and marks changed
+   tickets with `*` in the summary. Approved tickets stay RELEASE_PENDING
+   (set when the repository is created) until someone closes them; once
+   Koji has a build, the next step is closing the ticket as NEXTRELEASE.
 6. If nobody picks the ticket up, ask on the
    [Package Review Swaps](https://discussion.fedoraproject.org/c/workflows/pkg-review-swap/91)
    category or the devel list.
