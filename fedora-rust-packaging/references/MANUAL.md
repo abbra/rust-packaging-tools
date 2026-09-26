@@ -91,6 +91,11 @@ $T copr --all --project user/project -r fedora-45-x86_64
 
 # 7. Package review, after mock-chain built everything.
 $T review --all -r fedora-45-x86_64
+
+# 8. Submit to Fedora: publish in COPR, then file the review requests.
+$T copr --all --project user/project -r fedora-rawhide-x86_64 --wait
+$T review-request --all --project user/project --fas <account>          # drafts
+$T review-request --all --project user/project --fas <account> --file   # Bugzilla
 ```
 
 `init` does not stop on problems: it prints each one as `ACTION NEEDED: …` on
@@ -114,6 +119,7 @@ hold:
 | `mock-chain CRATE…\|--all [-r CHROOT] [-n]` | Run `mock --chain` over the SRPMs in dependency order. |
 | `copr CRATE…\|--all --project P [-r CHROOT]… [-n] [--wait]` | Submit to COPR. Each stage is chained after the previous one with `--after-build-id`. With `--wait`, watch the builds until they finish and fail if any failed. |
 | `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
+| `review-request CRATE…\|--all --project P --fas NAME [-r CHROOT] [--needs-sponsor] [--comment TEXT] [--file]` | Prepare the Bugzilla review request of each package, in dependency order, from its latest succeeded COPR build (chroot default `fedora-rawhide-x86_64`). Requires a passing `review` of the current SRPM and a published spec identical to the local one. Writes `review-request.txt`. With `--file`, files it (or, if already filed, posts the new Spec/SRPM URLs) and records the bug in `review-request.json`. See "Submitting to Fedora". |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…]` | Show packaged version vs. crates.io vs. Fedora, and whether a patch and an SRPM exist. |
 
@@ -210,6 +216,75 @@ the same; check the package-specific ones and report them to the user:
 | Package is not known to require an ExcludeArch tag / builds on all architectures | `-devel` is noarch; mention architecture-specific code (e.g. a feature that asserts 64-bit). |
 | gpgverify | Not applicable: crates.io publishes no signatures. |
 | %build honors compiler flags, naming, -devel, FHS, macros, %doc at runtime, changelog, legible spec, desktop/systemd files, rename Obsoletes, conflicts, timestamps | Satisfied by rust2rpm's template and `cargo-rpm-macros`; nothing to check per package. |
+
+## Submitting to Fedora
+
+The official process is the
+[Package Review Process](https://docs.fedoraproject.org/en-US/package-maintainers/Package_Review_Process/)
+(source: `packaging/maintainer-docs` on forge.fedoraproject.org). For each
+new package, the contributor files a review request in Bugzilla that links a
+spec and an SRPM which can be downloaded directly, a reviewer checks it, and
+after approval (`fedora-review` flag `+`) the contributor requests a dist-git
+repository and builds the package in Koji.
+
+Before the first submission:
+
+- A Fedora account (FAS). File the tickets with the Bugzilla account tied to
+  the FAS e-mail address, or they are closed as invalid.
+- Membership in the `packager` group, or a sponsor: a first-time contributor
+  adds FE-NEEDSPONSOR to the blocked bugs (`review-request --needs-sponsor`;
+  one ticket is enough) and asks for sponsorship at
+  <https://forge.fedoraproject.org/packaging/sponsors/issues>.
+- A Bugzilla API key (<https://bugzilla.redhat.com/userprefs.cgi?tab=apikey>)
+  in `~/.config/python-bugzilla/bugzillarc`, for `--file`:
+  ```
+  [bugzilla.redhat.com]
+  api_key = <key>
+  ```
+- A COPR account and project: `copr-cli` configured from
+  <https://copr.fedorainfracloud.org/api/>, and
+  `copr-cli create --chroot fedora-rawhide-x86_64 <project>`. Reviews are for
+  Rawhide, so build there.
+
+Steps:
+
+1. `review` passes for every package (`[!]`-free) and `srpm` is current.
+2. `copr --all --project <owner/project> -r fedora-rawhide-x86_64 --wait`.
+   The stages are chained, so each package builds against the ones it needs.
+3. `review-request --all --project <owner/project> --fas <account>` writes
+   `<crate>/review-request.txt` for each package. It contains the ticket
+   summary (`Review Request: rust-<crate> - <Summary>`) and the first comment:
+   `Spec URL`, `SRPM URL` (from COPR: `…/srpm-builds/<id>/<srpm>` and
+   `…/<chroot>/<id>-rust-<crate>/rust-<crate>.spec`), `Upstream URL`,
+   `Description` (the spec's `%description`), `Fedora Account System
+   Username`, and the COPR build page. Read them before filing.
+4. Add `--file` to file them. Tickets are filed in dependency order; each
+   *depends on* the review tickets of the local packages it needs, so a
+   reviewer sees the chain (Rust SIG practice). If a dependency is an UPDATE
+   of a Fedora package, mention its update bug in the ticket by hand.
+5. If nobody picks the ticket up, ask on the
+   [Package Review Swaps](https://discussion.fedoraproject.org/c/workflows/pkg-review-swap/91)
+   category or the devel list.
+6. When the reviewer asks for changes: fix, `regen`, `srpm`, `review`, `copr
+   --wait` the changed packages, then `review-request … --file` posts the new
+   Spec/SRPM URLs as a comment (add `--comment "…"` to say what changed).
+   Clear a `NotReady` whiteboard entry in Bugzilla by hand.
+
+After approval (`fedora-review+`, ticket assigned to the reviewer):
+
+```
+fedpkg request-repo rust-<crate> <bug>       # needs a forge token in ~/.config/rpkg/fedpkg.conf
+fedpkg clone rust-<crate> && cd rust-<crate> # once the fedora-scm-requests ticket is closed
+fedpkg import <path to the SRPM> && git commit && git push
+fedpkg build
+```
+
+Build the packages of a chain in the stages that `order` prints; before
+building a stage, wait until the previous stage is in the buildroot
+(`koji wait-repo --target rawhide --build <nvr>`). For other releases, request
+branches, build there and create Bodhi updates. Close the review ticket with
+resolution `NEXTRELEASE` once the package is built (or let Bodhi close it), and
+add the package to release monitoring.
 
 ## Resolving `ACTION NEEDED`
 
