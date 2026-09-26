@@ -54,6 +54,11 @@ before the first use, for the file formats and the table of fixes for each
   - UPDATE of a crate Fedora already ships (it affects other Fedora packages)
   - a required dependency lacking features in Fedora
   - deleting existing packages
+- **Public actions need the user's explicit approval each time:** creating a
+  COPR project, submitting COPR builds (`copr` without `-n`), and anything in
+  Bugzilla (`review-request --file`, which files tickets or posts comments
+  under the user's name). Show the plan or the drafts first; never pass
+  `--file` on your own.
 
 ## Workflow
 
