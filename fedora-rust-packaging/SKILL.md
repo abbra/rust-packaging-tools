@@ -3,7 +3,7 @@ name: fedora-rust-packaging
 description: Package Rust crates for Fedora with rust2rpm, including every dependency crate missing from Fedora. Use when asked to package a crate (or a project's missing Rust dependencies) as RPMs, to create or update rust-<crate> specs, to fix a rust2rpm Cargo.toml patch or test selection, or to build such packages in mock or COPR in dependency order.
 compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
 metadata:
-  version: "1.4"
+  version: "1.5"
 ---
 
 # Fedora Rust crate packaging
