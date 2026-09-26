@@ -1599,6 +1599,188 @@ def cmd_review_request(args) -> None:
         die(f"no review request for: {', '.join(failed)}")
 
 
+# ─── review status (Bugzilla, read-only) ─────────────────────────────────────
+
+# accounts that comment automatically (repository creation, Bodhi, release monitoring)
+BZ_BOTS = {"fedora-admin-xmlrpc", "updates", "upstream-release-monitoring", "fedora-review-bot"}
+# fedora-review-service: rebuilds the posted SRPM in COPR and runs fedora-review on it
+REVIEW_BOT = "fedora-review-bot"
+BUG_FIELDS = ("id,summary,status,resolution,creator,assigned_to,flags,whiteboard,"
+              "blocks,depends_on,last_change_time")
+
+
+def bz_rest(path: str) -> dict:
+    return json.loads(_get(f"https://{BUGZILLA_HOST}/rest/{path}"))
+
+
+def find_review_bug(crate: str) -> dict | None:
+    """The open or newest review ticket of rust-<crate>, searched by summary."""
+    title = f"Review Request: rust-{crate} - "
+    query = urllib.parse.urlencode({"product": "Fedora", "component": "Package Review",
+                                    "summary": title, "include_fields": BUG_FIELDS})
+    bugs = [b for b in bz_rest(f"bug?{query}")["bugs"] if b["summary"].startswith(title)]
+    bugs.sort(key=lambda b: (b["status"] != "CLOSED", b["id"]))
+    return bugs[-1] if bugs else None
+
+
+def review_flag(bug: dict) -> tuple[str, str]:
+    for f in bug.get("flags", []):
+        if f["name"] == "fedora-review":
+            return f["status"], f.get("setter", "")
+    return "", ""
+
+
+def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -> str:
+    """Print the state of one review ticket; return the next step."""
+    rpm_name = f"rust-{pkg.crate}"
+    if state.get("bug"):
+        bug = bz_rest(f"bug/{state['bug']}?include_fields={BUG_FIELDS}")["bugs"][0]
+    else:
+        bug = find_review_bug(pkg.crate)
+        if not bug:
+            info(f"== {rpm_name}: no review ticket")
+            return "file one with 'review-request --file'"
+        info(f"== {rpm_name}: found bug {bug['id']} (not filed with review-request)")
+        if record:
+            state = {"bug": bug["id"]}
+            (pkg.dir / REQUEST_STATE).write_text(json.dumps(state, indent=2) + "\n")
+    url = f"https://{BUGZILLA_HOST}/show_bug.cgi?id={bug['id']}"
+    submitter = bug["creator_detail"]["name"] if "creator_detail" in bug else bug["creator"]
+    reviewer = bug.get("assigned_to_detail", {}).get("name", bug["assigned_to"])
+    flag, setter = review_flag(bug)
+    status = bug["status"] + (f" {bug['resolution']}" if bug["resolution"] else "")
+    info(f"== {rpm_name}: {url}")
+    info(f"   {status}; fedora-review{flag or ' (not set)'}"
+         + (f" by {setter}" if setter else "")
+         + ("; no reviewer yet" if reviewer == "nobody" else f"; reviewer {reviewer}")
+         + f"; last change {bug['last_change_time'][:10]}")
+    if bug.get("whiteboard"):
+        info(f"   whiteboard: {bug['whiteboard']}")
+    if FE_NEEDSPONSOR in bug.get("blocks", []):
+        info("   blocks FE-NEEDSPONSOR (a sponsor is needed)")
+    for dep in bug.get("depends_on", []):
+        d = bz_rest(f"bug/{dep}?include_fields=id,summary,status,resolution,flags")["bugs"]
+        if d:
+            d = d[0]
+            dflag, _ = review_flag(d)
+            info(f"   depends on {d['id']}: {d['summary'][:60]} "
+                 f"[{d['status']}{' ' + d['resolution'] if d['resolution'] else ''}"
+                 f"{', fedora-review' + dflag if dflag else ''}]")
+    needinfo = [f for f in bug.get("flags", []) if f["name"] == "needinfo" and f["status"] == "?"]
+    for f in needinfo:
+        info(f"   NEEDINFO from {f.get('requestee', '?')}, asked by {f['setter']}")
+
+    comments = bz_rest(f"bug/{bug['id']}/comment")["bugs"][str(bug["id"])]["comments"]
+    log = pkg.dir / f"review-bug-{bug['id']}.txt"
+    log.write_text("".join(f"=== #{c['count']} {c['creator']} {c['time']}\n{c['text']}\n\n" for c in comments))
+    last_own = max((i for i, c in enumerate(comments) if c["creator"] == submitter), default=0)
+    unanswered = [c for c in comments[last_own + 1:] if c["creator"] not in BZ_BOTS]
+    if unanswered:
+        info(f"   {len(unanswered)} comment(s) since the submitter's last one (all comments: {log}):")
+        for c in unanswered[-show:]:
+            lines = c["text"].strip().splitlines()
+            info(f"   --- #{c['count']} {c['creator']} {c['time'][:10]}")
+            info(textwrap.indent("\n".join(lines[:40]), "      "))
+            if len(lines) > 40:
+                info(f"      [... {len(lines) - 40} more lines in {log}]")
+
+    bot_problem = review_bot_result(pkg, comments, submitter)
+
+    posted = re.findall(r"SRPM URL:\s*(\S+)", "\n".join(c["text"] for c in comments if c["creator"] == submitter))
+    local_nvr = f"{rpm_name}-{spec_query(pkg.spec, '%{version}-%{release}')}"
+    if posted and local_nvr not in posted[-1]:
+        info(f"   the last posted SRPM is {posted[-1].rsplit('/', 1)[-1]}, the local package is {local_nvr}")
+
+    if bug["status"] == "CLOSED":
+        if bug["resolution"] in ("NEXTRELEASE", "RAWHIDE", "ERRATA", "CURRENTRELEASE"):
+            return "done: the package is in Fedora"
+        return f"closed as {bug['resolution']}; read the last comments"
+    if flag == "-":
+        return "rejected (fedora-review-); read the last comments"
+    if needinfo and any(f.get("requestee") == submitter for f in needinfo):
+        return "answer the reviewer's question (NEEDINFO on you)"
+    if unanswered and flag != "+":
+        return ("address the comments above: fix, regen, srpm, review, copr --wait, then "
+                "'review-request --file --comment \"<what changed>\"'"
+                + (f"; also: {bot_problem}" if bot_problem else ""))
+    if bot_problem and flag != "+":
+        return bot_problem
+    if posted and local_nvr not in posted[-1]:
+        return "post the new URLs: copr --wait, then 'review-request --file'"
+    if flag == "+":
+        try:
+            _get(f"https://src.fedoraproject.org/api/0/rpms/{rpm_name}")
+            return f"approved, repository exists: fedpkg clone {rpm_name}; import the SRPM and build"
+        except urllib.error.HTTPError:
+            return f"approved: fedpkg request-repo {rpm_name} {bug['id']}"
+    if "NotReady" in (bug.get("whiteboard") or ""):
+        return "marked NotReady: address the issues, post new URLs, clear the whiteboard"
+    if flag == "?":
+        return f"under review by {reviewer}; wait"
+    return "waiting for a reviewer (ask on Package Review Swaps if it takes long)"
+
+
+def review_bot_result(pkg: LocalPackage, comments: list[dict], submitter: str) -> str | None:
+    """Print the review bot's latest result; return a next step if it found a problem."""
+    bot = [c for c in comments if c["creator"] == REVIEW_BOT]
+    if not bot:
+        return None
+    last = bot[-1]
+    last_urls = max((i for i, c in enumerate(comments)
+                     if c["creator"] == submitter and "SRPM URL:" in c["text"]), default=0)
+    stale = comments.index(last) < last_urls
+    m = re.search(r"/coprs/build/(\d+)", last["text"])
+    state = "?"
+    if m:
+        try:
+            state = json.loads(_get(f"{COPR_URL}/api_3/build/{m.group(1)}"))["state"]
+        except urllib.error.URLError:
+            state = (re.findall(r"\((\w+)\)", last["text"]) or ["?"])[0]
+    info(f"   review bot (#{last['count']}, {last['time'][:10]}): COPR build {m.group(1) if m else '?'} {state}"
+         + (" — older than the last posted URLs; the bot has not built them yet" if stale else ""))
+    if stale:
+        return None
+    if state == "failed":
+        log = re.findall(r"(https://\S+builder-live\.log\S*)", last["text"])
+        info(f"      build log: {log[0] if log else 'see the COPR build'}")
+        return ("the review bot's COPR build failed: read its build log; missing BuildRequires must be "
+                "review tickets listed in Depends On (or packages already in Fedora)")
+    template = re.findall(r"(https://\S+/fedora-review/review\.txt)", last["text"])
+    if not template:
+        return None
+    try:
+        issues = json.loads(_get(template[0].removesuffix(".txt") + ".json"))["issues"]
+    except (urllib.error.URLError, ValueError):
+        info(f"      review template: {template[0]} (no longer available for automatic checking)")
+        return None
+    left = []
+    for issue in issues:
+        text = issue["text"] + (f" ({issue['note']})" if issue.get("note") else "")
+        if expected_review_issue(issue, pkg):
+            info(f"      [~] {text[:150]}")
+        else:
+            left.append(text)
+            info(f"      [!] {text[:150]}")
+    info(f"      template: {template[0]}")
+    return "fix the issues the review bot found ([!] above)" if left else None
+
+
+def cmd_review_status(args) -> None:
+    pkgs = select(args.root, args.crates, args.all)
+    if all(p.crate_file and p.crate_file.exists() for p in pkgs):
+        pkgs = [p for s in build_stages(pkgs, args.root) for p in s]  # dependency order
+    summary = []
+    for pkg in pkgs:
+        nxt = review_status_one(pkg, request_state(pkg), args.record, args.comments)
+        info(f"   next: {nxt}")
+        summary.append((f"rust-{pkg.crate}", nxt))
+    if len(summary) > 1:
+        info("\nsummary:")
+        width = max(len(n) for n, _ in summary)
+        for n, nxt in summary:
+            info(f"   {n.ljust(width)}  {nxt}")
+
+
 # ─── status ──────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> None:
@@ -1751,6 +1933,14 @@ def main() -> None:
     sp.add_argument("--file", action="store_true",
                     help="file new requests / post updated URLs in Bugzilla (default: only write drafts)")
     sp.set_defaults(func=cmd_review_request)
+
+    sp = sub.add_parser("review-status", help="show the state of the Bugzilla review tickets (read-only)")
+    with_sel(sp)
+    sp.add_argument("--comments", type=int, default=5, metavar="N",
+                    help="show up to N unanswered comments per ticket (default %(default)s)")
+    sp.add_argument("--record", action="store_true",
+                    help="record tickets found by summary search in review-request.json")
+    sp.set_defaults(func=cmd_review_status)
 
     sp = sub.add_parser("doctor", help="check that the required tools are installed")
     sp.set_defaults(func=cmd_doctor)
