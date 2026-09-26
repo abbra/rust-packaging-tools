@@ -125,6 +125,12 @@ hold:
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…]` | Show packaged version vs. crates.io vs. Fedora, and whether a patch and an SRPM exist. |
 
+Bugs, comments and builds in the output are links. On a terminal they are
+OSC 8 hyperlinks on short labels (the bug number, `#3`, the build ID);
+otherwise, e.g. when an agent or a pipe reads the output, the full URL is
+printed. `RUST_DEPS_NO_HYPERLINKS=1` prints full URLs on a terminal too, for
+terminals that do not support OSC 8.
+
 Caches live in `~/.cache/rust-packaging-tools`:
 - crates.io responses
 - the Fedora crate list, refreshed daily or with `--refresh` on `resolve`, `init` and `status`
