@@ -1538,6 +1538,19 @@ def koji_task_url(pkg: LocalPackage, task: str) -> tuple[str | None, str | None]
     return f"{KOJI_URL}/koji/taskinfo?taskID={m.group(1)}", None
 
 
+def koji_latest_build(name: str) -> str | None:
+    """NVR of the newest completed Koji build of a package, or None."""
+    try:
+        hub = xmlrpc.client.ServerProxy(f"{KOJI_URL}/kojihub", allow_none=True)
+        pid = hub.getPackageID(name)
+        if not pid:
+            return None
+        builds = hub.listBuilds({"packageID": pid, "state": 1, "__starstar": True})  # 1 = COMPLETE
+    except (OSError, xmlrpc.client.Error):
+        return None
+    return max(builds, key=lambda b: b["build_id"])["nvr"] if builds else None
+
+
 def review_request_text(pkg: LocalPackage, urls: dict, fas: str) -> tuple[str, str]:
     summary = spec_query(pkg.spec, "%{summary}").strip()
     description = spec_query(pkg.spec, "%{description}").strip()
@@ -1775,7 +1788,13 @@ def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
         return bot_problem
     if outdated:
         return "post the new URLs: copr --wait, then 'review-request --file'"
-    if flag == "+":
+    if flag == "+" or bug["status"] == "RELEASE_PENDING":
+        # RELEASE_PENDING is set by the script that creates the dist-git repository
+        if nvr := koji_latest_build(rpm_name):
+            return (f"built in Koji ({nvr}): close the ticket as NEXTRELEASE "
+                    "(a Bodhi update that names it closes it when it reaches stable)")
+        if bug["status"] == "RELEASE_PENDING":
+            return f"approved, repository created: fedpkg clone {rpm_name}; import the SRPM and build"
         try:
             _get(f"https://src.fedoraproject.org/api/0/rpms/{rpm_name}")
             return f"approved, repository exists: fedpkg clone {rpm_name}; import the SRPM and build"
