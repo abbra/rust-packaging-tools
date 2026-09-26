@@ -5,7 +5,10 @@
 #
 # Targets (default: --claude):
 #   --claude           ~/.claude/skills (Claude Code, all projects)
-#   --project DIR      DIR/.claude/skills (Claude Code, one project)
+#   --project DIR      DIR/.claude/skills (Claude Code, one project; OMP also
+#                      loads project-level .claude/skills)
+#   --agents           ~/.agents/skills (OMP/oh-my-pi's own user skills
+#                      directory, also read by other agents)
 #   --dest DIR         any skills directory: every tool that loads Agent Skills
 #                      (a directory with SKILL.md) from a folder
 #
@@ -34,6 +37,7 @@ uninstall=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --claude)    targets+=("$HOME/.claude/skills"); shift ;;
+        --agents)    targets+=("$HOME/.agents/skills"); shift ;;
         --project)   [[ $# -ge 2 ]] || die "--project needs a directory"
                      targets+=("$(realpath -m "$2")/.claude/skills"); shift 2 ;;
         --dest)      [[ $# -ge 2 ]] || die "--dest needs a directory"
