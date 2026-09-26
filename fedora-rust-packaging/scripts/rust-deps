@@ -34,6 +34,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import xmlrpc.client
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1510,6 +1511,26 @@ def local_review_problem(pkg: LocalPackage) -> str | None:
     return f"fedora-review found unexplained issues: {'; '.join(left)}" if left else None
 
 
+KOJI_URL = "https://koji.fedoraproject.org"
+
+
+def koji_task_url(pkg: LocalPackage, task: str) -> tuple[str | None, str | None]:
+    """URL of a successful Koji build task of the local SRPM, or (None, problem)."""
+    m = re.fullmatch(r"(?:.*taskID=)?(\d+)", task.strip())
+    if not m:
+        return None, f"not a Koji task ID or taskinfo URL: {task}"
+    info_ = xmlrpc.client.ServerProxy(f"{KOJI_URL}/kojihub", allow_none=True).getTaskInfo(int(m.group(1)), True)
+    if not info_:
+        return None, f"Koji task {m.group(1)} does not exist"
+    srpm = str(info_["request"][0]).rsplit("/", 1)[-1] if info_.get("request") else ""
+    nvr = f"rust-{pkg.crate}-{spec_query(pkg.spec, '%{version}-%{release}')}"
+    if info_["method"] != "build" or not srpm.startswith(nvr + "."):
+        return None, f"Koji task {m.group(1)} is not a build of {nvr} ({info_['method']} {srpm})"
+    if info_["state"] != 2:  # 2 = CLOSED (succeeded)
+        return None, f"Koji task {m.group(1)} did not succeed"
+    return f"{KOJI_URL}/koji/taskinfo?taskID={m.group(1)}", None
+
+
 def review_request_text(pkg: LocalPackage, urls: dict, fas: str) -> tuple[str, str]:
     summary = spec_query(pkg.spec, "%{summary}").strip()
     description = spec_query(pkg.spec, "%{description}").strip()
@@ -1520,7 +1541,8 @@ def review_request_text(pkg: LocalPackage, urls: dict, fas: str) -> tuple[str, s
             f"Upstream URL: {upstream}\n\n"
             f"Description:\n{description}\n\n"
             f"Fedora Account System Username: {fas}\n\n"
-            f"COPR build: {urls['build_url']}\n")
+            f"COPR build: {urls['build_url']}\n"
+            + (f"Koji scratch build: {urls['koji_url']}\n" if urls.get("koji_url") else ""))
     return title, body
 
 
@@ -1544,6 +1566,12 @@ def cmd_review_request(args) -> None:
     local = local_packages(args.root)
     deps = local_deps(pkgs, args.root)
     bz = bugzilla_client() if args.file else None
+    koji_tasks = {}
+    for item in args.koji_task:
+        crate, sep, task = item.partition("=")
+        if not sep or crate not in {p.crate for p in pkgs}:
+            die(f"--koji-task expects CRATE=TASK for a selected crate: {item}")
+        koji_tasks[crate] = task
     failed = []
     for pkg in pkgs:
         info(f"== review request rust-{pkg.crate} {pkg.version}")
@@ -1551,6 +1579,8 @@ def cmd_review_request(args) -> None:
         urls = None
         if not problem:
             urls, problem = copr_review_urls(pkg, args.project, args.chroot)
+        if not problem and pkg.crate in koji_tasks:
+            urls["koji_url"], problem = koji_task_url(pkg, koji_tasks[pkg.crate])
         if problem:
             action(f"{pkg.crate}: {problem}")
             failed.append(pkg.crate)
@@ -1574,6 +1604,8 @@ def cmd_review_request(args) -> None:
                 info(f"   {bug_url} already has these URLs")
                 continue
             comment = f"Spec URL: {urls['spec_url']}\nSRPM URL: {urls['srpm_url']}\n"
+            if urls.get("koji_url"):
+                comment += f"Koji scratch build: {urls['koji_url']}\n"
             if args.comment:
                 comment += f"\n{args.comment}\n"
             if not args.file:
@@ -1930,6 +1962,8 @@ def main() -> None:
     sp.add_argument("--needs-sponsor", action="store_true",
                     help="block FE-NEEDSPONSOR (you are not in the packager group yet)")
     sp.add_argument("--comment", help="extra text for the comment that posts updated URLs")
+    sp.add_argument("--koji-task", action="append", default=[], metavar="CRATE=TASK",
+                    help="link a successful Koji scratch build (task ID or taskinfo URL) of the crate's SRPM")
     sp.add_argument("--file", action="store_true",
                     help="file new requests / post updated URLs in Bugzilla (default: only write drafts)")
     sp.set_defaults(func=cmd_review_request)
