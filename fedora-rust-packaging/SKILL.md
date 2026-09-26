@@ -14,9 +14,24 @@ it with its full path. `references/MANUAL.md` is the complete manual. Read it
 before the first use, for the file formats and the table of fixes for each
 `ACTION NEEDED` message.
 
+The skill directory comes from the harness:
+
+- **Claude Code:** the "Base directory for this skill" line above this text.
+- **OMP (oh-my-pi):** the `[Skill directory: …]` line after this text when the
+  user ran `/skill:fedora-rust-packaging`. Otherwise use the `skill://` URL:
+  OMP's bash tool runs `skill://fedora-rust-packaging/scripts/rust-deps` as
+  that file, and its read tool reads
+  `skill://fedora-rust-packaging/references/MANUAL.md`.
+- **Elsewhere:** the directory that holds this `SKILL.md`.
+
 ## Invocation
 
-Arguments given with `/fedora-rust-packaging`: `$ARGUMENTS`
+Arguments given with the skill command (`/fedora-rust-packaging` in Claude
+Code, `/skill:fedora-rust-packaging` in OMP): `$ARGUMENTS`
+
+Claude Code puts the arguments in place of the placeholder above. OMP leaves
+the placeholder as it is and appends the arguments after the skill text as
+`User: <arguments>`. If neither shows any, there are none.
 
 Read them as follows (forms can be combined with `--root <dir>`):
 
