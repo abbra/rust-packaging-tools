@@ -1859,16 +1859,18 @@ def review_bot_result(pkg: LocalPackage | None, comments: list[dict], submitter:
 
 def user_review_bugs(user: str, include_closed: bool) -> list[dict]:
     """Package Review tickets filed by a Bugzilla user, newest first."""
-    bugs, offset = [], 0
+    params = {"product": "Fedora", "component": "Package Review", "creator": user,
+              "include_fields": BUG_FIELDS, "order": "bug_id DESC"}
+    if not include_closed:
+        params.update(f1="bug_status", o1="notequals", v1="CLOSED")
+    bugs = []
     while True:
-        query = urllib.parse.urlencode({"product": "Fedora", "component": "Package Review", "creator": user,
-                                        "include_fields": BUG_FIELDS, "order": "bug_id DESC",
-                                        "limit": 100, "offset": offset})
-        page = bz_rest(f"bug?{query}")["bugs"]
-        bugs += page
-        if len(page) < 100:
+        # Bugzilla returns at most 20 bugs per request, whatever limit asks for,
+        # and rejects an offset without a limit
+        data = bz_rest(f"bug?{urllib.parse.urlencode({**params, 'limit': 20, 'offset': len(bugs)})}")
+        bugs += data["bugs"]
+        if not data["bugs"] or len(bugs) >= data.get("total_matches", 0):
             break
-        offset += 100
     return [b for b in bugs if b.get("creator_detail", {}).get("name", user) == user
             and (include_closed or b["status"] != "CLOSED")]
 
