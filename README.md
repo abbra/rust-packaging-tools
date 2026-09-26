@@ -53,6 +53,8 @@ rust-deps init --recursive jsonschema          # create all missing packages
 rust-deps trial --discover --apply jsonschema  # pick tests that can run
 rust-deps srpm --all && rust-deps mock-chain --all -r fedora-45-x86_64
 rust-deps review --all -r fedora-45-x86_64      # fedora-review, before submitting
+rust-deps copr --all --project me/rust -r fedora-rawhide-x86_64 --wait
+rust-deps review-request --all --project me/rust --fas me   # drafts; --file files them
 ```
 
 The full workflow and reference is in
