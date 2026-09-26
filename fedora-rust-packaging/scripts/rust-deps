@@ -947,7 +947,20 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         if new.crate_file.exists() and not (requires.get("build") or requires.get("lib")):
             if hint := sys_hint(tomllib.loads(read_crate_member(new.crate_file, "Cargo.toml"))):
                 action(f"{pkg.crate}: {hint}")
+        if compiled := compiled_doc_files(new.crate_file, pkg.spec):
+            action(f"{pkg.crate}: {', '.join(compiled)} marked %doc but compiled into the crate (include_str!); "
+                   "the package must work without its documentation, so add to [package] in rust2rpm.toml: "
+                   f"doc-files.exclude = {json.dumps(compiled)}, with a comment saying why")
     return True
+
+
+def compiled_doc_files(crate_file: Path, spec: Path) -> list[str]:
+    """%doc files of the spec that the crate's sources include with include_str!/include_bytes!."""
+    docs = re.findall(r"^%doc %\{crate_instdir\}/(\S+)$", spec.read_text(), re.M)
+    sources = "\n".join(read_crate_member(crate_file, m) or "" for m in crate_members(crate_file)
+                        if m.endswith(".rs") and not m.startswith(("tests/", "benches/", "examples/")))
+    return [d for d in docs
+            if re.search(r'include_(?:str|bytes)!\s*\(\s*"(?:[^"]*/)?' + re.escape(d) + '"', sources)]
 
 
 def cmd_regen(args) -> None:
