@@ -1,11 +1,14 @@
 # rust-packaging-tools
 
-Source tree of the **fedora-rust-packaging** skill. It packages Rust crates for
-Fedora with rust2rpm, including every dependency crate that Fedora is missing.
-It is both:
+Set of tools to aid packaging Rust crates for Fedora Project.
 
-- a command-line tool for people: `rust-deps`, in
-  `fedora-rust-packaging/scripts/`
+This project provides the **fedora-rust-packaging** skill. It packages Rust
+crates for Fedora with rust2rpm, including every dependency crate that Fedora
+is missing.
+
+The project consists of two components:
+
+- a command-line tool for people: `rust-deps`, in `fedora-rust-packaging/scripts/`
 - an [Agent Skill](https://agentskills.io): the `fedora-rust-packaging/`
   directory with `SKILL.md`, which Claude and other skill-enabled agents can
   use
@@ -15,7 +18,7 @@ rust-packaging-tools/
 ├── install.sh                     installs the skill and/or the command
 └── fedora-rust-packaging/         the skill (self-contained, location independent)
     ├── SKILL.md                   instructions for agents
-    ├── scripts/rust-deps          the tool (Python 3, no extra modules beyond rust2rpm)
+    ├── scripts/rust-deps          the tool (Python 3, no extra modules beyond rust2rpm and python3-bugzilla)
     └── references/MANUAL.md       the manual: workflow, file formats, fixes
 ```
 
@@ -39,10 +42,25 @@ root is `--root DIR`, else `$RUST_DEPS_ROOT`, else the current directory.
 Targets can be combined. Re-running `install.sh` updates an existing
 installation. It refuses to overwrite anything that is not this skill.
 
-Then check the prerequisites:
+After installation, check the prerequisites:
 
 ```
 rust-deps doctor        # or: ~/.claude/skills/fedora-rust-packaging/scripts/rust-deps doctor
+$ ./fedora-rust-packaging/scripts/rust-deps --root ~/src/packages doctor
+   ok      rust2rpm   /usr/sbin/rust2rpm
+   ok      cargo      /usr/sbin/cargo
+   ok      rpmbuild   /usr/sbin/rpmbuild
+   ok      spectool   /usr/sbin/spectool
+   ok      rpmlint    /usr/sbin/rpmlint
+   ok      dnf        /usr/sbin/dnf
+   ok      patch      /usr/sbin/patch
+   ok      unshare    /usr/sbin/unshare
+   ok      ip         /usr/sbin/ip
+   ok      mock       /usr/sbin/mock
+   ok      copr-cli   /usr/sbin/copr-cli
+   ok      fedora-review /usr/sbin/fedora-review
+   ok      mock group
+   root    /home/username/src/packages (19 packages)
 ```
 
 ## Use it yourself
@@ -54,10 +72,10 @@ rust-deps init --recursive jsonschema          # create all missing packages
 rust-deps trial --discover --apply jsonschema  # pick tests that can run
 rust-deps srpm --all && rust-deps mock-chain --all -r fedora-45-x86_64
 rust-deps review --all -r fedora-45-x86_64      # fedora-review, before submitting
-rust-deps copr --all --project me/rust -r fedora-rawhide-x86_64 --wait
-rust-deps review-request --all --project me/rust --fas me   # drafts; --file files them
+rust-deps copr --all --project username/repo -r fedora-rawhide-x86_64 --wait
+rust-deps review-request --all --project username/repo --fas username   # drafts; --file files them
 rust-deps review-status --all                   # reviewer comments, next steps
-rust-deps review-status --user me              # all your review tickets, tracked in ~/.cache
+rust-deps review-status --user username              # all your review tickets, tracked in ~/.cache
 ```
 
 The full workflow and reference is in
