@@ -275,6 +275,18 @@ Steps:
    Spec/SRPM URLs as a comment (add `--comment "…"` to say what changed).
    Clear a `NotReady` whiteboard entry in Bugzilla by hand.
 
+The review bot (`fedora-review-bot`, the
+[fedora-review-service](https://github.com/FrostyX/fedora-review-service))
+answers every comment that contains new Spec/SRPM URLs: it rebuilds the SRPM
+for Rawhide in its own COPR project and runs fedora-review there. It installs
+missing BuildRequires only from the packages of the tickets listed in
+**Depends On** (and from Fedora), which is why `review-request` links the
+dependency tickets; without them a chain of new crates fails to build. A
+comment containing `[fedora-review-service-build]` makes it build again.
+`review-status` shows its latest build state and, while the bot's template
+is still available (its COPR results expire after some weeks), the issues its
+fedora-review found. Treat them like the ones from `review`.
+
 After approval (`fedora-review+`, ticket assigned to the reviewer):
 
 ```
