@@ -72,6 +72,27 @@ def warn(msg: str) -> None:
     print(f"WARNING: {msg}", file=sys.stderr, flush=True)
 
 
+# OSC 8 hyperlinks when stdout is a terminal; otherwise print URLs in full, which
+# terminals, logs and agent transcripts turn into links themselves
+_HYPERLINKS = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and not os.environ.get("RUST_DEPS_NO_HYPERLINKS")
+
+
+def link(url: str, label: str | None = None, keep_label: bool = False) -> str:
+    """A clickable reference to url: the label as a terminal hyperlink, or the URL
+    itself (after the label with keep_label, when the URL does not show it)."""
+    if label is not None and _HYPERLINKS:
+        return f"\033]8;;{url}\033\\{label}\033]8;;\033\\"
+    return f"{label} {url}" if label is not None and keep_label else url
+
+
+def visible_len(text: str) -> int:
+    return len(re.sub(r"\033\]8;;[^\033]*\033\\", "", text))
+
+
+def ljust_visible(text: str, width: int) -> str:
+    return text + " " * max(0, width - visible_len(text))
+
+
 def action(msg: str) -> None:
     """Something a human (or agent) must decide or fix."""
     print(f"ACTION NEEDED: {msg}", file=sys.stderr, flush=True)
@@ -1328,7 +1349,7 @@ def cmd_copr(args) -> None:
                 if not m:
                     die(f"cannot parse build id:\n{res.stdout}")
                 bid = m[-1]
-            info(f"   {p.crate}: build {bid}")
+            info(f"   {p.crate}: build {bid if args.dry_run else link(copr_build_url(bid), bid)}")
             ids.append(bid)
             first = first or bid
         # COPR puts a build with --after-build-id into the batch after the one
@@ -1539,7 +1560,7 @@ def koji_task_url(pkg: LocalPackage, task: str) -> tuple[str | None, str | None]
 
 
 def koji_latest_build(name: str) -> str | None:
-    """NVR of the newest completed Koji build of a package, or None."""
+    """The newest completed Koji build of a package (a link labelled with its NVR), or None."""
     try:
         hub = xmlrpc.client.ServerProxy(f"{KOJI_URL}/kojihub", allow_none=True)
         pid = hub.getPackageID(name)
@@ -1548,7 +1569,10 @@ def koji_latest_build(name: str) -> str | None:
         builds = hub.listBuilds({"packageID": pid, "state": 1, "__starstar": True})  # 1 = COMPLETE
     except (OSError, xmlrpc.client.Error):
         return None
-    return max(builds, key=lambda b: b["build_id"])["nvr"] if builds else None
+    if not builds:
+        return None
+    newest = max(builds, key=lambda b: b["build_id"])
+    return link(f"{KOJI_URL}/koji/buildinfo?buildID={newest['build_id']}", newest["nvr"], keep_label=True)
 
 
 def review_request_text(pkg: LocalPackage, urls: dict, fas: str) -> tuple[str, str]:
@@ -1619,9 +1643,9 @@ def cmd_review_request(args) -> None:
             failed.append(pkg.crate)
             continue
         if state.get("bug"):
-            bug_url = f"https://{BUGZILLA_HOST}/show_bug.cgi?id={state['bug']}"
+            ticket = bug_url(state["bug"])
             if (state.get("spec_url"), state.get("srpm_url")) == (urls["spec_url"], urls["srpm_url"]):
-                info(f"   {bug_url} already has these URLs")
+                info(f"   {ticket} already has these URLs")
                 continue
             comment = f"Spec URL: {urls['spec_url']}\nSRPM URL: {urls['srpm_url']}\n"
             if urls.get("koji_url"):
@@ -1629,14 +1653,14 @@ def cmd_review_request(args) -> None:
             if args.comment:
                 comment += f"\n{args.comment}\n"
             if not args.file:
-                info(f"   update for {bug_url} (post with --file):\n" + textwrap.indent(comment, "      "))
+                info(f"   update for {ticket} (post with --file):\n" + textwrap.indent(comment, "      "))
                 continue
             bz.update_bugs([state["bug"]], bz.build_update(comment=comment))
-            info(f"   posted the new URLs to {bug_url}")
+            info(f"   posted the new URLs to {ticket}")
         else:
             if not args.file:
                 info(f"   draft written to {pkg.dir / REQUEST_DRAFT}"
-                     + (f"; depends on bug(s) {', '.join(map(str, depends))}" if depends else ""))
+                     + (f"; depends on {', '.join(link(bug_url(b), str(b)) for b in depends)}" if depends else ""))
                 info(textwrap.indent(f"Summary: {title}\n\n{body}", "      "))
                 continue
             created = bz.createbug(bz.build_createbug(
@@ -1644,7 +1668,7 @@ def cmd_review_request(args) -> None:
                 summary=title, description=body, depends_on=depends or None,
                 blocks=[FE_NEEDSPONSOR] if args.needs_sponsor else None))
             state = {"bug": created.id}
-            info(f"   filed https://{BUGZILLA_HOST}/show_bug.cgi?id={created.id}")
+            info(f"   filed {bug_url(created.id)}")
         state.update(spec_url=urls["spec_url"], srpm_url=urls["srpm_url"])
         (pkg.dir / REQUEST_STATE).write_text(json.dumps(state, indent=2) + "\n")
     if failed:
@@ -1657,6 +1681,16 @@ def cmd_review_request(args) -> None:
 BZ_BOTS = {"fedora-admin-xmlrpc", "updates", "upstream-release-monitoring", "fedora-review-bot"}
 # fedora-review-service: rebuilds the posted SRPM in COPR and runs fedora-review on it
 REVIEW_BOT = "fedora-review-bot"
+def bug_url(bug_id: int | str, comment: int | None = None) -> str:
+    if comment is not None:
+        return f"https://{BUGZILLA_HOST}/show_bug.cgi?id={bug_id}#c{comment}"
+    return f"https://{BUGZILLA_HOST}/{bug_id}"
+
+
+def copr_build_url(build_id: int | str) -> str:
+    return f"{COPR_URL}/coprs/build/{build_id}"
+
+
 BUG_FIELDS = ("id,summary,status,resolution,creator,assigned_to,flags,whiteboard,"
               "blocks,depends_on,last_change_time")
 
@@ -1682,7 +1716,7 @@ def review_flag(bug: dict) -> tuple[str, str]:
     return "", ""
 
 
-def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -> str:
+def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -> tuple[str, int | None]:
     """Find the review ticket of a local package, print its state; return the next step."""
     rpm_name = f"rust-{pkg.crate}"
     if state.get("bug"):
@@ -1691,12 +1725,12 @@ def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -
         bug = find_review_bug(pkg.crate)
         if not bug:
             info(f"== {rpm_name}: no review ticket")
-            return "file one with 'review-request --file'"
-        info(f"== {rpm_name}: found bug {bug['id']} (not filed with review-request)")
+            return "file one with 'review-request --file'", None
+        info(f"== {rpm_name}: found {link(bug_url(bug['id']), 'bug ' + str(bug['id']))} (not filed with review-request)")
         if record:
             state = {"bug": bug["id"]}
             (pkg.dir / REQUEST_STATE).write_text(json.dumps(state, indent=2) + "\n")
-    return review_ticket_report(bug, rpm_name, show, pkg.dir / f"review-bug-{bug['id']}.txt", pkg)
+    return review_ticket_report(bug, rpm_name, show, pkg.dir / f"review-bug-{bug['id']}.txt", pkg), bug["id"]
 
 
 def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
@@ -1709,7 +1743,7 @@ def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
     check), report what changed since and mark new comments; record is filled
     with what the next check compares against.
     """
-    url = f"https://{BUGZILLA_HOST}/show_bug.cgi?id={bug['id']}"
+    url = bug_url(bug["id"])
     submitter = bug["creator_detail"]["name"] if "creator_detail" in bug else bug["creator"]
     reviewer = bug.get("assigned_to_detail", {}).get("name", bug["assigned_to"])
     flag, setter = review_flag(bug)
@@ -1734,7 +1768,7 @@ def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
         if d:
             d = d[0]
             dflag, _ = review_flag(d)
-            info(f"   depends on {d['id']}: {d['summary'][:60]} "
+            info(f"   depends on {link(bug_url(d['id']), str(d['id']))}: {d['summary'][:60]} "
                  f"[{d['status']}{' ' + d['resolution'] if d['resolution'] else ''}"
                  f"{', fedora-review' + dflag if dflag else ''}]")
     needinfo = [f for f in bug.get("flags", []) if f["name"] == "needinfo" and f["status"] == "?"]
@@ -1759,13 +1793,13 @@ def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
         info(f"   {len(unanswered)} comment(s) since the submitter's last one (all comments: {log}):")
         for c in shown:
             lines = c["text"].strip().splitlines()
-            info(f"   --- #{c['count']} {c['creator']} {c['time'][:10]}"
+            info(f"   --- {link(bug_url(bug['id'], c['count']), '#' + str(c['count']))} {c['creator']} {c['time'][:10]}"
                  + (" [new]" if c["count"] >= seen else ""))
             info(textwrap.indent("\n".join(lines[:40]), "      "))
             if len(lines) > 40:
                 info(f"      [... {len(lines) - 40} more lines in {log}]")
 
-    bot_problem = review_bot_result(pkg, comments, submitter)
+    bot_problem = review_bot_result(pkg, comments, submitter, bug["id"])
 
     outdated = False
     if pkg:
@@ -1796,7 +1830,7 @@ def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
     if flag == "+" or bug["status"] == "RELEASE_PENDING":
         # RELEASE_PENDING is set by the script that creates the dist-git repository
         if nvr := koji_latest_build(rpm_name):
-            return (f"built in Koji ({nvr}): close the ticket as NEXTRELEASE "
+            return (f"built in Koji as {nvr} ; close the ticket as NEXTRELEASE "
                     "(a Bodhi update that names it closes it when it reaches stable)")
         if bug["status"] == "RELEASE_PENDING":
             return f"approved, repository created: fedpkg clone {rpm_name}; import the SRPM and build"
@@ -1812,7 +1846,8 @@ def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
     return "waiting for a reviewer (ask on Package Review Swaps if it takes long)"
 
 
-def review_bot_result(pkg: LocalPackage | None, comments: list[dict], submitter: str) -> str | None:
+def review_bot_result(pkg: LocalPackage | None, comments: list[dict], submitter: str,
+                      bug_id: int) -> str | None:
     """Print the review bot's latest result; return a next step if it found a problem."""
     bot = [c for c in comments if c["creator"] == REVIEW_BOT]
     if not bot:
@@ -1828,7 +1863,9 @@ def review_bot_result(pkg: LocalPackage | None, comments: list[dict], submitter:
             state = json.loads(_get(f"{COPR_URL}/api_3/build/{m.group(1)}"))["state"]
         except urllib.error.URLError:
             state = (re.findall(r"\((\w+)\)", last["text"]) or ["?"])[0]
-    info(f"   review bot (#{last['count']}, {last['time'][:10]}): COPR build {m.group(1) if m else '?'} {state}"
+    comment = link(bug_url(bug_id, last["count"]), f"#{last['count']}")
+    build = link(copr_build_url(m.group(1)), m.group(1)) if m else "?"
+    info(f"   review bot ({comment}, {last['time'][:10]}): COPR build {build} {state}"
          + (" — older than the last posted URLs; the bot has not built them yet" if stale else ""))
     if stale:
         return None
@@ -1900,9 +1937,10 @@ def review_status_user(user: str, include_closed: bool, show: int) -> None:
         summary.append((str(bug["id"]), rpm_name, nxt, fresh))
     state_file.write_text(json.dumps({**old, **new}, indent=2) + "\n")
     info(f"\nsummary for {user} ('*' = new or changed since the last check; state in {cache}):")
-    w1, w2 = max(len(b) for b, *_ in summary), max(len(n) for _, n, *_ in summary)
-    for bug_id, name, nxt, fresh in summary:
-        info(f" {'*' if fresh else ' '} {bug_id.ljust(w1)}  {name.ljust(w2)}  {nxt}")
+    refs = [link(bug_url(b), b) for b, *_ in summary]
+    w1, w2 = max(visible_len(r) for r in refs), max(len(n) for _, n, *_ in summary)
+    for ref, (_, name, nxt, fresh) in zip(refs, summary):
+        info(f" {'*' if fresh else ' '} {ljust_visible(ref, w1)}  {name.ljust(w2)}  {nxt}")
 
 
 def cmd_review_status(args) -> None:
@@ -1916,14 +1954,15 @@ def cmd_review_status(args) -> None:
         pkgs = [p for s in build_stages(pkgs, args.root) for p in s]  # dependency order
     summary = []
     for pkg in pkgs:
-        nxt = review_status_one(pkg, request_state(pkg), args.record, args.comments)
+        nxt, bug_id = review_status_one(pkg, request_state(pkg), args.record, args.comments)
         info(f"   next: {nxt}")
-        summary.append((f"rust-{pkg.crate}", nxt))
+        summary.append((f"rust-{pkg.crate}", link(bug_url(bug_id), str(bug_id)) if bug_id else "-", nxt))
     if len(summary) > 1:
         info("\nsummary:")
-        width = max(len(n) for n, _ in summary)
-        for n, nxt in summary:
-            info(f"   {n.ljust(width)}  {nxt}")
+        w1 = max(len(n) for n, *_ in summary)
+        w2 = max(visible_len(b) for _, b, _ in summary)
+        for n, b, nxt in summary:
+            info(f"   {n.ljust(w1)}  {ljust_visible(b, w2)}  {nxt}")
 
 
 # ─── status ──────────────────────────────────────────────────────────────────
