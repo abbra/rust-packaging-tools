@@ -1318,6 +1318,100 @@ def cmd_copr(args) -> None:
         after = first
 
 
+# ─── fedora-review ───────────────────────────────────────────────────────────
+
+# fedora-review's default mock options plus --isolation=simple: under
+# systemd-nspawn, mock prints a "Note: ..." line that fedora-review reads as
+# part of evaluated macros (e.g. "Release: 1Note: ..."), and parsing the spec
+# fails.  --uniqueext keeps the review root apart from the mock-chain one.
+REVIEW_MOCK_OPTS = ("--no-cleanup-after --no-clean --plugin-option=tmpfs:keep_mounted=True "
+                    "--isolation=simple --uniqueext=rust-deps-review")
+
+
+def expected_review_issue(issue: dict, pkg: LocalPackage) -> str | None:
+    """Why a failed fedora-review check is expected for a rust2rpm spec, or None."""
+    note = issue.get("note") or ""
+    if issue.get("name") == "CheckFileDuplicates":
+        dups = re.findall(r"File listed twice: (\S+)", note)
+        instdir = f"/usr/share/cargo/registry/{pkg.crate}-{pkg.version}/"
+        if dups and all(d.startswith(instdir) for d in dups):
+            return ("rust2rpm lists %doc/%license files inside %{crate_instdir}/, which %files also "
+                    "owns whole; standard for Fedora Rust packages")
+    return None
+
+
+def review_one(pkg: LocalPackage, chroot: str, results: Path, closure: set[str], local: dict) -> bool:
+    work = CACHE_DIR / "review" / chroot / pkg.crate
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    shutil.copy2(pkg.spec, work)
+    shutil.copy2(srpm_of(pkg), work)
+    cmd = ["fedora-review", "-n", f"rust-{pkg.crate}", "-m", str(chroot), "-B", "-o", REVIEW_MOCK_OPTS]
+    if closure:
+        depdir = work / "deps"
+        depdir.mkdir()
+        for d in sorted(closure):
+            built = sorted(results.glob(f"rust-{d}-{local[d].version}-*"))
+            rpms = [r for r in (built[-1].glob("*.rpm") if built else []) if not r.name.endswith(".src.rpm")]
+            if not rpms:
+                action(f"{pkg.crate}: no RPMs of local dependency {d} {local[d].version} in {results}; "
+                       "build them first with 'mock-chain'")
+                return False
+            for r in rpms:
+                shutil.copy2(r, depdir)
+        cmd += ["-L", str(depdir)]
+    info(f"== review {pkg.crate} {pkg.version}" + (f" (local deps: {', '.join(sorted(closure))})" if closure else ""))
+    # a clean root: fedora-review keeps it between runs (--no-clean), and
+    # packages left from another review could hide a missing BuildRequires
+    run(["mock", "-r", str(chroot), "--isolation=simple", "--uniqueext=rust-deps-review", "--scrub=chroot"],
+        capture_output=True)
+    res = run(cmd, cwd=work, capture_output=True)
+    (work / "fedora-review.out").write_text(res.stdout + res.stderr)
+    report = work / f"review-rust-{pkg.crate}"
+    if not (report / "review.json").exists():
+        info(f"   FAILED  fedora-review did not produce a report (see {work / 'fedora-review.out'})")
+        for ln in (res.stdout + res.stderr).strip().splitlines()[-5:]:
+            info(f"      {ln}")
+        return False
+    data = json.loads((report / "review.json").read_text())
+    pending = sum(1 for groups in data["results"].values() for items in groups.values()
+                  for it in items if it["result"] == "pending")
+    unexplained = []
+    for issue in data["issues"]:
+        why = expected_review_issue(issue, pkg)
+        text = issue["text"] + (f" ({issue['note']})" if issue.get("note") else "")
+        if why:
+            info(f"   [~] {text}\n       expected: {why}")
+        else:
+            unexplained.append(text)
+            info(f"   [!] {text}")
+    info(f"   {len(unexplained)} unexplained issue(s), {len(data['issues']) - len(unexplained)} expected; "
+         f"{pending} item(s) need a manual check")
+    info(f"   report: {report / 'review.txt'}")
+    return not unexplained
+
+
+def cmd_review(args) -> None:
+    if not shutil.which("fedora-review"):
+        die("fedora-review is not installed (dnf install fedora-review)")
+    pkgs = [p for s in build_stages(select(args.root, args.crates, args.all), args.root) for p in s]
+    local = local_packages(args.root)
+    deps = local_deps([p for p in local.values() if p.version], args.root)
+    results = Path(args.localrepo or (CACHE_DIR / "mock-repo")) / "results" / args.chroot
+    failed = []
+    for pkg in pkgs:
+        closure, todo = set(), list(deps.get(pkg.crate, ()))
+        while todo:
+            d = todo.pop()
+            if d not in closure:
+                closure.add(d)
+                todo += deps.get(d, ())
+        if not review_one(pkg, args.chroot, results, closure, local):
+            failed.append(pkg.crate)
+    if failed:
+        die(f"review needs attention for: {', '.join(failed)}")
+
+
 # ─── status ──────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> None:
@@ -1347,7 +1441,8 @@ REQUIRED_TOOLS = {
     "rpmlint": "rpmlint", "dnf": "dnf5", "patch": "patch", "unshare": "util-linux",
     "ip": "iproute",
 }
-OPTIONAL_TOOLS = {"mock": "mock (for mock-chain)", "copr-cli": "copr-cli (for copr)"}
+OPTIONAL_TOOLS = {"mock": "mock (for mock-chain)", "copr-cli": "copr-cli (for copr)",
+                  "fedora-review": "fedora-review (for review)"}
 
 
 def cmd_doctor(args) -> None:
@@ -1450,6 +1545,12 @@ def main() -> None:
     sp.add_argument("-r", "--chroot", action="append", default=[])
     sp.add_argument("-n", "--dry-run", action="store_true")
     sp.set_defaults(func=cmd_copr)
+
+    sp = sub.add_parser("review", help="run fedora-review on each package (after mock-chain)")
+    with_sel(sp)
+    sp.add_argument("-r", "--chroot", default="fedora-rawhide-x86_64")
+    sp.add_argument("--localrepo", help="mock-chain local repository holding the dependencies' RPMs")
+    sp.set_defaults(func=cmd_review)
 
     sp = sub.add_parser("doctor", help="check that the required tools are installed")
     sp.set_defaults(func=cmd_doctor)
