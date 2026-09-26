@@ -169,5 +169,7 @@ the crate directory. For a version that is not on crates.io yet:
   when mock or the review was not run.
 - **Review findings:** each `[!]` fixed or left open, and the package-specific
   answers to the manual review items.
+- **Submission:** COPR builds, and for each package its review request (draft
+  path, or ticket URL once filed).
 - **Open decisions** the user must make: UPDATE of Fedora packages, default
   features, compat packages.
