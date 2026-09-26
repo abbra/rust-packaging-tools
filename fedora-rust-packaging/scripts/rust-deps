@@ -1231,10 +1231,9 @@ def cmd_srpm(args) -> None:
 
 # ─── build order, mock, copr ─────────────────────────────────────────────────
 
-def build_stages(pkgs: list[LocalPackage], root: Path) -> list[list[LocalPackage]]:
-    """Group packages into stages; each stage only needs earlier stages (and Fedora)."""
+def local_deps(pkgs: list[LocalPackage], root: Path) -> dict[str, set[str]]:
+    """crate -> local packages (under root) that its patched Cargo.toml depends on."""
     local = local_packages(root)
-    names = {p.crate for p in pkgs}
     deps: dict[str, set[str]] = {}
     with tempfile.TemporaryDirectory() as tmp:
         for p in pkgs:
@@ -1242,6 +1241,13 @@ def build_stages(pkgs: list[LocalPackage], root: Path) -> list[list[LocalPackage
             toml = tomllib.loads((src / "Cargo.toml").read_text())
             deps[p.crate] = {d["crate_id"] for d in manifest_deps(toml)
                              if not is_foreign(d["target"]) and d["crate_id"] in local and d["crate_id"] != p.crate}
+    return deps
+
+
+def build_stages(pkgs: list[LocalPackage], root: Path) -> list[list[LocalPackage]]:
+    """Group packages into stages; each stage only needs earlier stages (and Fedora)."""
+    names = {p.crate for p in pkgs}
+    deps = local_deps(pkgs, root)
     for c, ds in deps.items():
         outside = ds - names
         if outside:
