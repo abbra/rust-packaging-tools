@@ -180,6 +180,14 @@ Read them as follows (forms can be combined with `--root <dir>`):
      about the reviews. Read the full thread in
      `<crate>/review-bug-<id>.txt` before acting on a comment, and summarize
      for the user what each reviewer asks.
+   - A ticket with `fedora-review+`, in RELEASE_PENDING (set when the dist-git
+     repository is created) or CLOSED is a **finished review**: the package
+     is in, or being imported into, Fedora. Do not analyse its comments or
+     review bot results, and do not propose changes to it through the review;
+     the only steps left are those `review-status` names (import and build,
+     then close the ticket). Remarks a reviewer left with the approval are
+     handled later as normal dist-git updates, if the user wants them. Only a
+     new comment on such a ticket may need attention.
    - For all review tickets of a person (e.g. the user's FAS/Bugzilla login),
      including ones outside the packages tree, use `$T review-status --user
      <login>`. It remembers the last check in
