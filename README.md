@@ -52,6 +52,7 @@ rust-deps resolve jsonschema                   # what is missing in Fedora?
 rust-deps init --recursive jsonschema          # create all missing packages
 rust-deps trial --discover --apply jsonschema  # pick tests that can run
 rust-deps srpm --all && rust-deps mock-chain --all -r fedora-45-x86_64
+rust-deps review --all -r fedora-45-x86_64      # fedora-review, before submitting
 ```
 
 The full workflow and reference is in
