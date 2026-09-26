@@ -1,7 +1,7 @@
 ---
 name: fedora-rust-packaging
 description: Package Rust crates for Fedora with rust2rpm, including every dependency crate missing from Fedora. Use when asked to package a crate (or a project's missing Rust dependencies) as RPMs, to create or update rust-<crate> specs, to fix a rust2rpm Cargo.toml patch or test selection, or to build such packages in mock or COPR in dependency order.
-compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock and copr-cli are optional, for builds.
+compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
 metadata:
   version: "1.1"
 ---
@@ -108,7 +108,18 @@ before the first use, for the file formats and the table of fixes for each
      remaining packages. The local repository keeps what already built.
    - Otherwise print `$T mock-chain --all -n` and the COPR command
      (`$T copr --all --project <p> -r <chroot> -n`) for the user.
-7. **Consumer:** if the crates were needed by a project (like `authz-details-rs`
+7. **Review:** after `mock-chain` succeeded, run `$T review --all -r <same
+   chroot>` (in the background; it rebuilds every package in mock). It runs
+   `fedora-review` with the local dependencies from the mock-chain results.
+   - `[~]` lines are failed checks known to be expected for rust2rpm specs.
+   - Fix every `[!]` line in `rust2rpm.toml` or upstream, then `regen`,
+     `srpm`, `mock-chain` that package and `review` it again.
+   - Go through the `[ ]` manual items of each `review.txt` with the table in
+     `references/MANUAL.md` ("Package review"), and report the answers that
+     are specific to the package (license findings, bundled code, disabled
+     tests, license workarounds).
+   - Without mock, say that the review was not run.
+8. **Consumer:** if the crates were needed by a project (like `authz-details-rs`
    needing jsonschema), re-check it with `$T resolve --manifest … --local-root <tree holding its sibling crates>`. Expect "all
    available" or only the new local packages. Patch its spec requirement if you
    bumped a version.
