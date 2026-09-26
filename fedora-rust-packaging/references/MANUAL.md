@@ -277,8 +277,14 @@ Steps:
 
 The review bot (`fedora-review-bot`, the
 [fedora-review-service](https://github.com/FrostyX/fedora-review-service))
-answers every comment that contains new Spec/SRPM URLs: it rebuilds the SRPM
-for Rawhide in its own COPR project and runs fedora-review there. It installs
+is meant to answer every comment that contains new Spec/SRPM URLs: it rebuilds
+the SRPM for Rawhide in its own COPR project (`@fedora-review/fedora-review-<bug>-<package>`)
+and runs fedora-review there. It does not always run: it made no comments and
+no COPR projects for tickets filed after 2026-08-28 (checked 2026-09-26). Do not
+count on it; `review-status` shows whether it answered. Reviewers then rely on
+the submitter's build evidence, so link a successful build in the request
+(the COPR build is linked automatically; see `--koji-task` for a Koji scratch
+build). It installs
 missing BuildRequires only from the packages of the tickets listed in
 **Depends On** (and from Fedora), which is why `review-request` links the
 dependency tickets; without them a chain of new crates fails to build. A
