@@ -56,6 +56,7 @@ rust-deps review --all -r fedora-45-x86_64      # fedora-review, before submitti
 rust-deps copr --all --project me/rust -r fedora-rawhide-x86_64 --wait
 rust-deps review-request --all --project me/rust --fas me   # drafts; --file files them
 rust-deps review-status --all                   # reviewer comments, next steps
+rust-deps review-status --user me              # all your review tickets, tracked in ~/.cache
 ```
 
 The full workflow and reference is in
