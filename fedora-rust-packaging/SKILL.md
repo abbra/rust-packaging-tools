@@ -14,6 +14,24 @@ it with its full path. `references/MANUAL.md` is the complete manual. Read it
 before the first use, for the file formats and the table of fixes for each
 `ACTION NEEDED` message.
 
+## Invocation
+
+Arguments given with `/fedora-rust-packaging`: `$ARGUMENTS`
+
+Read them as follows (forms can be combined with `--root <dir>`):
+
+- **crate names**, optionally `name@version` (`jsonschema serde_json_path@0.7`):
+  package them and every missing dependency (the whole workflow below).
+- **`--manifest <path/Cargo.toml>`**, or a path to a project directory or its
+  `Cargo.toml`: package the project's dependencies that Fedora is missing.
+- **a `rust-deps` command** with its arguments (`status`, `resolve …`,
+  `trial <crate>`, `srpm --all`, `review --all -r <chroot>`,
+  `review-status --all`, `review-status --user <login>`, …): run only that
+  step and report its result.
+- **`--root <dir>`**: the packages root (see Setup).
+- **nothing**: show the user these forms with one example each, and ask what
+  to package and where the packages root is.
+
 ## Setup
 
 1. **Packages root.** Each package lives in `<root>/<crate>/`. Use the directory
