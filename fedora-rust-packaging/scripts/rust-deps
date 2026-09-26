@@ -1750,9 +1750,14 @@ def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
         info(f"   {len(comments) - seen} new comment(s) since the check on {prev['checked'][:10]}")
     if record is not None:
         record.update(status=status, **{"fedora-review": flag}, reviewer=reviewer, comments=len(comments))
-    if unanswered:
+    # after approval or closing, the comments are usually the review itself: show only new ones
+    quiet = flag == "+" or bug["status"] == "CLOSED"
+    shown = [c for c in unanswered[-show:] if not quiet or c["count"] >= seen]
+    if unanswered and not shown:
+        info(f"   {len(unanswered)} earlier comment(s) after the submitter's last one (in {log})")
+    if shown:
         info(f"   {len(unanswered)} comment(s) since the submitter's last one (all comments: {log}):")
-        for c in unanswered[-show:]:
+        for c in shown:
             lines = c["text"].strip().splitlines()
             info(f"   --- #{c['count']} {c['creator']} {c['time'][:10]}"
                  + (" [new]" if c["count"] >= seen else ""))
