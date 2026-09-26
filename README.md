@@ -28,6 +28,7 @@ root is `--root DIR`, else `$RUST_DEPS_ROOT`, else the current directory.
 ```
 ./install.sh                          # Claude Code, all projects: ~/.claude/skills
 ./install.sh --project ~/src/myproj   # Claude Code, one project: <dir>/.claude/skills
+./install.sh --agents                 # OMP (oh-my-pi) and others: ~/.agents/skills
 ./install.sh --dest DIR               # any other agent's skills directory
 ./install.sh --zip fedora-rust-packaging.zip   # archive for uploading as a skill
 ./install.sh --bin ~/.local/bin       # also put 'rust-deps' on your PATH
@@ -69,3 +70,22 @@ jsonschema needs for Fedora in ~/src/packages". The agent follows `SKILL.md`:
 it runs `rust-deps` with your packages root, and resolves or reports each
 problem. It builds in mock when you are in the `mock` group. It hands decisions
 that affect other Fedora packages back to you.
+
+To name the task directly, run the skill as a command with arguments:
+
+| harness | command |
+|---|---|
+| Claude Code | `/fedora-rust-packaging jsonschema --root ~/src/packages` |
+| OMP (oh-my-pi) | `/skill:fedora-rust-packaging jsonschema --root ~/src/packages` |
+
+The arguments are crate names, `--manifest <Cargo.toml>`, or a single
+`rust-deps` command such as `review-status --user <login>`; with none, the
+agent asks.
+
+### OMP (oh-my-pi)
+
+OMP loads user skills from `~/.agents/skills` (`./install.sh --agents`).
+It ignores `~/.claude/skills` unless `skills.enableClaudeUser` is turned on
+(`omp config set skills.enableClaudeUser true`), but it does load
+project-level `.claude/skills`. Check that it sees the skill with
+`omp read skill://fedora-rust-packaging`.
