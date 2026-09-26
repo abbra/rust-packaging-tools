@@ -135,8 +135,15 @@ before the first use, for the file formats and the table of fixes for each
    - With approval, the same command with `--file` files the tickets in
      dependency order (or posts updated URLs to existing ones). Give the user
      the ticket URLs.
+   - `$T review-status --all` (read-only) shows each ticket's state, the
+     reviewers' comments that were not answered yet, open NEEDINFO requests,
+     the review bot's result, and the next step. Run it whenever the user asks
+     about the reviews. Read the full thread in
+     `<crate>/review-bug-<id>.txt` before acting on a comment, and summarize
+     for the user what each reviewer asks.
    - After a reviewer's comments: fix, `regen`, `srpm`, `review`, `copr
      --wait`, then `review-request --file --comment "<what changed>"`.
+     Replying in Bugzilla in other ways is up to the user.
    - After approval (`fedora-review+`), give the user the `fedpkg
      request-repo`/`import`/`build` steps from the manual, in `order` stages.
 9. **Consumer:** if the crates were needed by a project (like `authz-details-rs`
