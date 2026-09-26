@@ -55,7 +55,8 @@ before the first use, for the file formats and the table of fixes for each
   - a required dependency lacking features in Fedora
   - deleting existing packages
 - **Public actions need the user's explicit approval each time:** creating a
-  COPR project, submitting COPR builds (`copr` without `-n`), and anything in
+  COPR project, submitting COPR builds (`copr` without `-n`), Koji scratch
+  builds, and anything in
   Bugzilla (`review-request --file`, which files tickets or posts comments
   under the user's name). Show the plan or the drafts first; never pass
   `--file` on your own.
@@ -131,7 +132,11 @@ before the first use, for the file formats and the table of fixes for each
    - With approval, `$T copr --all --project <p> -r fedora-rawhide-x86_64
      --wait`.
    - `$T review-request --all --project <p> --fas <name>` writes drafts to
-     `<crate>/review-request.txt`. Show them to the user.
+     `<crate>/review-request.txt`. Show them to the user. The review bot may
+     not respond (it has not since 2026-08-28), so the request carries its
+     own build evidence: the COPR build link, and for a user in the
+     `packager` group, with approval, a Koji scratch build
+     (`--koji-task <crate>=<task>`).
    - With approval, the same command with `--file` files the tickets in
      dependency order (or posts updated URLs to existing ones). Give the user
      the ticket URLs.
