@@ -124,7 +124,22 @@ before the first use, for the file formats and the table of fixes for each
      are specific to the package (license findings, bundled code, disabled
      tests, license workarounds).
    - Without mock, say that the review was not run.
-8. **Consumer:** if the crates were needed by a project (like `authz-details-rs`
+8. **Submit to Fedora** (only when the user wants the packages in Fedora):
+   follow "Submitting to Fedora" in `references/MANUAL.md`.
+   - Ask for the FAS account name, the COPR project (`owner/project`), and
+     whether the user is in the `packager` group (else `--needs-sponsor`).
+   - With approval, `$T copr --all --project <p> -r fedora-rawhide-x86_64
+     --wait`.
+   - `$T review-request --all --project <p> --fas <name>` writes drafts to
+     `<crate>/review-request.txt`. Show them to the user.
+   - With approval, the same command with `--file` files the tickets in
+     dependency order (or posts updated URLs to existing ones). Give the user
+     the ticket URLs.
+   - After a reviewer's comments: fix, `regen`, `srpm`, `review`, `copr
+     --wait`, then `review-request --file --comment "<what changed>"`.
+   - After approval (`fedora-review+`), give the user the `fedpkg
+     request-repo`/`import`/`build` steps from the manual, in `order` stages.
+9. **Consumer:** if the crates were needed by a project (like `authz-details-rs`
    needing jsonschema), re-check it with `$T resolve --manifest … --local-root <tree holding its sibling crates>`. Expect "all
    available" or only the new local packages. Patch its spec requirement if you
    bumped a version.
