@@ -146,6 +146,11 @@ before the first use, for the file formats and the table of fixes for each
      about the reviews. Read the full thread in
      `<crate>/review-bug-<id>.txt` before acting on a comment, and summarize
      for the user what each reviewer asks.
+   - For all review tickets of a person (e.g. the user's FAS/Bugzilla login),
+     including ones outside the packages tree, use `$T review-status --user
+     <login>`. It remembers the last check in
+     `~/.cache/rust-packaging-tools/review-status/<login>/`, so report what is
+     new since then first.
    - After a reviewer's comments: fix, `regen`, `srpm`, `review`, `copr
      --wait`, then `review-request --file --comment "<what changed>"`.
      Replying in Bugzilla in other ways is up to the user.
