@@ -96,6 +96,7 @@ $T review --all -r fedora-45-x86_64
 $T copr --all --project user/project -r fedora-rawhide-x86_64 --wait
 $T review-request --all --project user/project --fas <account>          # drafts
 $T review-request --all --project user/project --fas <account> --file   # Bugzilla
+$T review-status --all                                                  # where it stands
 ```
 
 `init` does not stop on problems: it prints each one as `ACTION NEEDED: …` on
@@ -120,6 +121,7 @@ hold:
 | `copr CRATE…\|--all --project P [-r CHROOT]… [-n] [--wait]` | Submit to COPR. Each stage is chained after the previous one with `--after-build-id`. With `--wait`, watch the builds until they finish and fail if any failed. |
 | `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
 | `review-request CRATE…\|--all --project P --fas NAME [-r CHROOT] [--needs-sponsor] [--comment TEXT] [--file]` | Prepare the Bugzilla review request of each package, in dependency order, from its latest succeeded COPR build (chroot default `fedora-rawhide-x86_64`). Requires a passing `review` of the current SRPM and a published spec identical to the local one. Writes `review-request.txt`. With `--file`, files it (or, if already filed, posts the new Spec/SRPM URLs) and records the bug in `review-request.json`. See "Submitting to Fedora". |
+| `review-status CRATE…\|--all [--comments N] [--record]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…]` | Show packaged version vs. crates.io vs. Fedora, and whether a patch and an SRPM exist. |
 
@@ -262,10 +264,13 @@ Steps:
    *depends on* the review tickets of the local packages it needs, so a
    reviewer sees the chain (Rust SIG practice). If a dependency is an UPDATE
    of a Fedora package, mention its update bug in the ticket by hand.
-5. If nobody picks the ticket up, ask on the
+5. `review-status --all` shows where each ticket stands and the next step;
+   run it regularly while the reviews are open. It prints comments from people
+   that came after your last comment, and open NEEDINFO requests.
+6. If nobody picks the ticket up, ask on the
    [Package Review Swaps](https://discussion.fedoraproject.org/c/workflows/pkg-review-swap/91)
    category or the devel list.
-6. When the reviewer asks for changes: fix, `regen`, `srpm`, `review`, `copr
+7. When the reviewer asks for changes: fix, `regen`, `srpm`, `review`, `copr
    --wait` the changed packages, then `review-request … --file` posts the new
    Spec/SRPM URLs as a comment (add `--comment "…"` to say what changed).
    Clear a `NotReady` whiteboard entry in Bugzilla by hand.
