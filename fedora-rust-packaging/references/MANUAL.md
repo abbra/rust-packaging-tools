@@ -20,7 +20,7 @@ can still regenerate each spec.
 
 ```
 sudo dnf install python3 rust2rpm cargo rpm-build rpmdevtools rpmlint dnf5 patch util-linux iproute
-# optional: mock (plus 'sudo usermod -aG mock $USER'), copr-cli
+# optional: mock, fedora-review (plus 'sudo usermod -aG mock $USER'), copr-cli
 ```
 
 `rust2rpm` provides the `python3-cargo2rpm` module that `rust-deps` uses for
@@ -88,6 +88,9 @@ $T srpm --all
 $T order --all
 $T mock-chain --all -r fedora-45-x86_64      # local, authoritative test
 $T copr --all --project user/project -r fedora-45-x86_64
+
+# 7. Package review, after mock-chain built everything.
+$T review --all -r fedora-45-x86_64
 ```
 
 `init` does not stop on problems: it prints each one as `ACTION NEEDED: …` on
@@ -110,6 +113,7 @@ hold:
 | `order CRATE…\|--all [--json]` | Print build stages. Each stage depends only on earlier stages and on Fedora. |
 | `mock-chain CRATE…\|--all [-r CHROOT] [-n]` | Run `mock --chain` over the SRPMs in dependency order. |
 | `copr CRATE…\|--all --project P [-r CHROOT]… [-n]` | Submit to COPR. Each stage is chained after the previous one with `--after-build-id`. |
+| `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…]` | Show packaged version vs. crates.io vs. Fedora, and whether a patch and an SRPM exist. |
 
@@ -156,6 +160,37 @@ draft comments; rewrite them to state the real reason.
 
 A hand-made `<crate>-fix-metadata.diff` also works: leave
 `cargo-toml-edits.toml` empty and `regen` re-applies the diff with `rust2rpm -r`.
+
+## Package review (`review`)
+
+A new Fedora package needs a review ticket in Bugzilla, and the reviewer runs
+`fedora-review` on it. `rust-deps review` runs it first, so that problems are
+found before submission. It uses the packages' SRPMs (so run `srpm` after
+every change) and rebuilds each one in a separate mock root
+(`--uniqueext=rust-deps-review`) that is scrubbed before every package.
+
+How it runs fedora-review, and why:
+
+- **Rebuild, not `--prebuilt`.** In fedora-review 0.12, `--prebuilt` never
+  installs the package under review: "Package installs properly" passes
+  without testing anything, and "Rpmlint (installed packages)" reports that
+  the packages are not installed.
+- **`-L <deps>`** holds the RPMs of every local package the crate depends on,
+  transitively, copied from the `mock-chain` results. fedora-review installs
+  all of them into the root before the build.
+- **`--isolation=simple`** in the mock options. With systemd-nspawn, mock
+  prints a `Note: in a future version of systemd-nspawn …` line, which
+  fedora-review reads as part of evaluated macros; the spec then fails to
+  parse (`Illegal char ':' … Release: 1Note:`).
+
+Failed checks known to be expected for rust2rpm specs (`[~]`):
+
+| check | why it is expected |
+|---|---|
+| Package does not contain duplicates in %files (`File listed twice: /usr/share/cargo/registry/<crate>-<ver>/…`) | rust2rpm's template marks `%license`/`%doc` files inside `%{crate_instdir}/` and also lists the directory whole. Fedora's own Rust packages (e.g. `rust-itoa`) do the same. |
+
+Anything else in `[!]` is a real problem: fix it in `rust2rpm.toml` (or
+upstream), `regen`, `srpm`, `mock-chain` the package, and `review` again.
 
 ## Resolving `ACTION NEEDED`
 
