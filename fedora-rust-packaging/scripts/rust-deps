@@ -1350,12 +1350,19 @@ REVIEW_MOCK_OPTS = ("--no-cleanup-after --no-clean --plugin-option=tmpfs:keep_mo
                     "--isolation=simple --uniqueext=rust-deps-review")
 
 
-def expected_review_issue(issue: dict, pkg: LocalPackage) -> str | None:
-    """Why a failed fedora-review check is expected for a rust2rpm spec, or None."""
+def expected_review_issue(issue: dict, pkg: LocalPackage | None) -> str | None:
+    """Why a failed fedora-review check is expected for a rust2rpm spec, or None.
+
+    Without a local package, any single crate directory in the registry counts.
+    """
     note = issue.get("note") or ""
     if issue.get("name") == "CheckFileDuplicates":
         dups = re.findall(r"File listed twice: (\S+)", note)
-        instdir = f"/usr/share/cargo/registry/{pkg.crate}-{pkg.version}/"
+        if pkg:
+            instdir = f"/usr/share/cargo/registry/{pkg.crate}-{pkg.version}/"
+        else:
+            m = re.match(r"/usr/share/cargo/registry/[^/]+/", dups[0]) if dups else None
+            instdir = m.group(0) if m else "\0"
         if dups and all(d.startswith(instdir) for d in dups):
             return ("rust2rpm lists %doc/%license files inside %{crate_instdir}/, which %files also "
                     "owns whole; standard for Fedora Rust packages")
@@ -1663,7 +1670,7 @@ def review_flag(bug: dict) -> tuple[str, str]:
 
 
 def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -> str:
-    """Print the state of one review ticket; return the next step."""
+    """Find the review ticket of a local package, print its state; return the next step."""
     rpm_name = f"rust-{pkg.crate}"
     if state.get("bug"):
         bug = bz_rest(f"bug/{state['bug']}?include_fields={BUG_FIELDS}")["bugs"][0]
@@ -1676,6 +1683,16 @@ def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -
         if record:
             state = {"bug": bug["id"]}
             (pkg.dir / REQUEST_STATE).write_text(json.dumps(state, indent=2) + "\n")
+    return review_ticket_report(bug, rpm_name, show, pkg.dir / f"review-bug-{bug['id']}.txt", pkg)
+
+
+def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
+                         pkg: LocalPackage | None = None) -> str:
+    """Print the state of one review ticket; return the next step.
+
+    With a local package, also compare the posted SRPM with it and phrase the
+    next steps with rust-deps commands.
+    """
     url = f"https://{BUGZILLA_HOST}/show_bug.cgi?id={bug['id']}"
     submitter = bug["creator_detail"]["name"] if "creator_detail" in bug else bug["creator"]
     reviewer = bug.get("assigned_to_detail", {}).get("name", bug["assigned_to"])
@@ -1703,7 +1720,6 @@ def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -
         info(f"   NEEDINFO from {f.get('requestee', '?')}, asked by {f['setter']}")
 
     comments = bz_rest(f"bug/{bug['id']}/comment")["bugs"][str(bug["id"])]["comments"]
-    log = pkg.dir / f"review-bug-{bug['id']}.txt"
     log.write_text("".join(f"=== #{c['count']} {c['creator']} {c['time']}\n{c['text']}\n\n" for c in comments))
     last_own = max((i for i, c in enumerate(comments) if c["creator"] == submitter), default=0)
     unanswered = [c for c in comments[last_own + 1:] if c["creator"] not in BZ_BOTS]
@@ -1718,10 +1734,14 @@ def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -
 
     bot_problem = review_bot_result(pkg, comments, submitter)
 
-    posted = re.findall(r"SRPM URL:\s*(\S+)", "\n".join(c["text"] for c in comments if c["creator"] == submitter))
-    local_nvr = f"{rpm_name}-{spec_query(pkg.spec, '%{version}-%{release}')}"
-    if posted and local_nvr not in posted[-1]:
-        info(f"   the last posted SRPM is {posted[-1].rsplit('/', 1)[-1]}, the local package is {local_nvr}")
+    outdated = False
+    if pkg:
+        posted = re.findall(r"SRPM URL:\s*(\S+)",
+                            "\n".join(c["text"] for c in comments if c["creator"] == submitter))
+        local_nvr = f"{rpm_name}-{spec_query(pkg.spec, '%{version}-%{release}')}"
+        outdated = bool(posted) and local_nvr not in posted[-1]
+        if outdated:
+            info(f"   the last posted SRPM is {posted[-1].rsplit('/', 1)[-1]}, the local package is {local_nvr}")
 
     if bug["status"] == "CLOSED":
         if bug["resolution"] in ("NEXTRELEASE", "RAWHIDE", "ERRATA", "CURRENTRELEASE"):
@@ -1730,14 +1750,15 @@ def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -
     if flag == "-":
         return "rejected (fedora-review-); read the last comments"
     if needinfo and any(f.get("requestee") == submitter for f in needinfo):
-        return "answer the reviewer's question (NEEDINFO on you)"
+        return "answer the reviewer's question (NEEDINFO on the submitter)"
     if unanswered and flag != "+":
-        return ("address the comments above: fix, regen, srpm, review, copr --wait, then "
-                "'review-request --file --comment \"<what changed>\"'"
-                + (f"; also: {bot_problem}" if bot_problem else ""))
+        how = ("fix, regen, srpm, review, copr --wait, then "
+               "'review-request --file --comment \"<what changed>\"'" if pkg
+               else "fix the package and post new Spec/SRPM URLs")
+        return f"address the comments above: {how}" + (f"; also: {bot_problem}" if bot_problem else "")
     if bot_problem and flag != "+":
         return bot_problem
-    if posted and local_nvr not in posted[-1]:
+    if outdated:
         return "post the new URLs: copr --wait, then 'review-request --file'"
     if flag == "+":
         try:
@@ -1752,7 +1773,7 @@ def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -
     return "waiting for a reviewer (ask on Package Review Swaps if it takes long)"
 
 
-def review_bot_result(pkg: LocalPackage, comments: list[dict], submitter: str) -> str | None:
+def review_bot_result(pkg: LocalPackage | None, comments: list[dict], submitter: str) -> str | None:
     """Print the review bot's latest result; return a next step if it found a problem."""
     bot = [c for c in comments if c["creator"] == REVIEW_BOT]
     if not bot:
