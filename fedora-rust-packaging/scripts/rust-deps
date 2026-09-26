@@ -1294,6 +1294,7 @@ def cmd_copr(args) -> None:
     stages = build_stages(select(args.root, args.crates, args.all), args.root)
     chroots = [a for c in args.chroot for a in ("-r", c)]
     after = None
+    ids = []
     for i, stage in enumerate(stages, 1):
         info(f"=== stage {i}")
         first = None
@@ -1312,10 +1313,15 @@ def cmd_copr(args) -> None:
                     die(f"cannot parse build id:\n{res.stdout}")
                 bid = m[-1]
             info(f"   {p.crate}: build {bid}")
+            ids.append(bid)
             first = first or bid
         # COPR puts a build with --after-build-id into the batch after the one
         # holding that build, so chaining on any build of a stage waits for all.
         after = first
+    if args.wait and not args.dry_run:
+        info("waiting for the builds to finish")
+        if run(["copr-cli", "watch-build", *ids]).returncode:
+            die("COPR builds failed; see the build pages")
 
 
 # ─── fedora-review ───────────────────────────────────────────────────────────
@@ -1544,6 +1550,7 @@ def main() -> None:
     sp.add_argument("--project", required=True, help="COPR project, e.g. user/project")
     sp.add_argument("-r", "--chroot", action="append", default=[])
     sp.add_argument("-n", "--dry-run", action="store_true")
+    sp.add_argument("--wait", action="store_true", help="wait until all builds have finished")
     sp.set_defaults(func=cmd_copr)
 
     sp = sub.add_parser("review", help="run fedora-review on each package (after mock-chain)")
