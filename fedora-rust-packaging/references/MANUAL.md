@@ -1,10 +1,10 @@
 # fedora-rust-packaging manual
 
 `rust-deps` automates packaging Rust crates for Fedora with
-[rust2rpm](https://pagure.io/fedora-rust/rust2rpm). Its main job is packaging
+[rust2rpm](https://codeberg.org/rust2rpm/rust2rpm). Its main job is packaging
 the crates that are missing from Fedora before your own crate can be built.
 
-It covers the whole loop:
+It covers the whole packaging process:
 
 1. find what is missing in Fedora
 2. create the packages
@@ -12,6 +12,8 @@ It covers the whole loop:
 4. choose which tests can run
 5. build the SRPMs
 6. build them in dependency order (mock or COPR)
+7. review before submission
+8. submit and follow the review process
 
 Every step is driven by files that rust2rpm understands, so `rust2rpm` alone
 can still regenerate each spec.

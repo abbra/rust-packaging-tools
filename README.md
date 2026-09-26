@@ -63,6 +63,20 @@ $ ./fedora-rust-packaging/scripts/rust-deps --root ~/src/packages doctor
    root    /home/username/src/packages (19 packages)
 ```
 
+Using [toolbx](https://containertoolbx.org/install/) is recommended as it
+allows to have easy environments for each Fedora release.
+
+Expected packages to be installed:
+```
+sudo dnf install python3 rust2rpm cargo rpm-build rpmdevtools rpmlint dnf5 patch util-linux iproute
+# optional: mock, fedora-review (plus 'sudo usermod -aG mock $USER'), copr-cli
+```
+
+`rust2rpm` provides the `python3-cargo2rpm` module that `rust-deps` uses for
+semver matching. `rust-deps doctor` checks all of this, including membership
+in the `mock` group and the user namespaces (with a working loopback
+interface) that offline trials need.
+
 ## Use it yourself
 
 ```
