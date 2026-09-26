@@ -1,0 +1,140 @@
+---
+name: fedora-rust-packaging
+description: Package Rust crates for Fedora with rust2rpm, including every dependency crate missing from Fedora. Use when asked to package a crate (or a project's missing Rust dependencies) as RPMs, to create or update rust-<crate> specs, to fix a rust2rpm Cargo.toml patch or test selection, or to build such packages in mock or COPR in dependency order.
+compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock and copr-cli are optional, for builds.
+metadata:
+  version: "1.1"
+---
+
+# Fedora Rust crate packaging
+
+All work goes through `scripts/rust-deps`, a CLI in this skill's directory; run
+it with its full path. `references/MANUAL.md` is the complete manual. Read it
+before the first use, for the file formats and the table of fixes for each
+`ACTION NEEDED` message.
+
+## Setup
+
+1. **Packages root.** Each package lives in `<root>/<crate>/`. Use the directory
+   the user names. If they name none, ask, and suggest an existing tree of
+   such packages or a new one (e.g. `~/src/packages`). Never guess, and never
+   use the skill's own directory. Pass it on every call:
+
+   ```
+   T="<skill dir>/scripts/rust-deps --root <packages root>"
+   ```
+
+   Setting `RUST_DEPS_ROOT=<packages root>` is equivalent.
+2. **Prerequisites.** Run `$T doctor`. Install what it reports missing (ask
+   before running `sudo`), or tell the user. If the user was only just added to
+   the `mock` group, the current session may not have it yet: run mock
+   commands through `sg mock -c '…'`.
+
+## Rules
+
+- **Never edit generated files:** `rust-<crate>.spec`, `*-fix-metadata*.diff`.
+  Change `rust2rpm.toml` or `cargo-toml-edits.toml`, then run `$T regen <crate>`.
+- **Never drop a required (non-optional) dependency.** Package it instead. Only
+  optional dependencies, the features that need them, and dev-dependencies may
+  be dropped.
+- **Every Cargo.toml edit and every disabled test needs a comment** stating the
+  real reason: `cargo-toml-patch-comments` for edits, `[tests] comments` for
+  tests. Replace generated drafts and all `TODO` text. Never leave `TODO` in a
+  finished package.
+- **Prefer the newest crates.io release.** If a consumer pins an older minor
+  version (e.g. `^0.57` while 0.58 exists), test the consumer against the new
+  version. If it works, patch the consumer's requirement rather than packaging
+  the old version.
+- **Keep tests running where possible.** Prefer `[set-dev-version]` to Fedora's
+  version over dropping a dev-dependency. Prefer skipping individual tests over
+  disabling a whole target. Disable a target when it cannot compile, needs data
+  missing from the crate, or takes too long.
+- **Do not decide these alone; report them to the user:**
+  - a dropped *default* feature with no obvious equivalent
+  - UPDATE of a crate Fedora already ships (it affects other Fedora packages)
+  - a required dependency lacking features in Fedora
+  - deleting existing packages
+
+## Workflow
+
+1. **Scope:** `$T resolve <crate>…` or `$T resolve --manifest <path/Cargo.toml>`.
+   Use `--json` for machine-readable output. Note NEW, UPDATE and FEATURES
+   entries.
+2. **Create:** `$T init --recursive <crate>…`. It prints `ACTION NEEDED:` lines
+   on stderr, and a `Suggested [tests] table` for each package.
+3. **For each package**, until `regen` prints no `ACTION NEEDED`:
+   - Resolve each `ACTION NEEDED` using the table in `references/MANUAL.md`. Typical fixes:
+     - set `summary`
+     - choose `add-default-features`
+     - try `set-dev-version`
+     - for a crate that links a C library (`links =`, or `pkg-config`,
+       `bindgen`, `cc` build-dependencies): read `build.rs` and add the
+       library to `[requires] build` *and* `lib`, e.g.
+       `"pkgconfig(openssl) >= 3.0.7"`. `build.rs` runs again in every
+       dependent crate's build, so the -devel package needs it too. Do not add
+       what Fedora's crates already pull in (bindgen brings `clang-libs`).
+     - a missing license file whose lookup failed: the crate's `repository`
+       may be a stale mirror. Find the repository that has the commit from
+       `.cargo_vcs_info.json` and use its raw URL as the extra source.
+   - Rewrite the draft `cargo-toml-patch-comments` so each says precisely what
+     was changed and why.
+   - `$T regen <crate>`
+4. **Tests**, for each package:
+   - `$T trial --discover --apply <crate>`
+   - Inspect the log it names (`~/.cache/rust-packaging-tools/trial/<crate>.log`)
+     to learn *why* each target fails.
+   - Write the reasons into `[tests] comments`.
+   - Tests that need the network fail in `trial` exactly as in mock. Skip them
+     individually with `skip.<target>`, and state the reason. Loopback
+     (`127.0.0.1`, `::1`) works in both, so a test that only talks to a local
+     server is not a network test. `--apply` re-checks into
+     `<crate>.recheck.log` and keeps the discovery log.
+   - `$T regen <crate>`, then `$T trial <crate>`, which must pass.
+   - If a whole target fails only because of one or two tests, switch to
+     `skip.<target>` with `skip-exact.<target> = true` instead of dropping the
+     target.
+5. **SRPMs:** `$T srpm --all` (or the list of crates). Every package must show
+   `%prep ok` and `0 errors`.
+6. **Order and build:** `$T order --all`.
+   - If the user can run mock (being in the `mock` group, no password prompt),
+     run `$T mock-chain --all -r fedora-<N>-x86_64`. Use the Fedora release
+     whose repositories `resolve` queried (the host's, unless
+     `RUST_DEPS_DNF_ARGS` changed it). It is the only authoritative check that
+     the packages build against Fedora's crate versions. Runs take long, so
+     run it in the background.
+   - When a build fails, read `root.log` (dependency problems) and `build.log`
+     (compile and test errors) in the results directory mock prints. Fix the
+     package, `regen`, `trial`, `srpm`, then resume the chain with only the
+     remaining packages. The local repository keeps what already built.
+   - Otherwise print `$T mock-chain --all -n` and the COPR command
+     (`$T copr --all --project <p> -r <chroot> -n`) for the user.
+7. **Consumer:** if the crates were needed by a project (like `authz-details-rs`
+   needing jsonschema), re-check it with `$T resolve --manifest … --local-root <tree holding its sibling crates>`. Expect "all
+   available" or only the new local packages. Patch its spec requirement if you
+   bumped a version.
+
+## Packaging inside the upstream repository
+
+When the specs live in the crate's own repository (as `rust2rpm.toml` +
+`rust-<crate>.spec` next to `Cargo.toml`), keep the upstream layout and style
+(e.g. `Release: 1%{?dist}` if the existing specs use it), and run rust2rpm in
+the crate directory. For a version that is not on crates.io yet:
+
+- `cargo package --no-verify --workspace` packages all workspace crates
+  against each other. Packaging a single crate that depends on an unpublished
+  sibling fails.
+- `$T regen <crate> --crate-file target/package/<crate>-<ver>.crate` (or
+  `rust2rpm --path <abs path to .crate>` directly) generates the spec from
+  that local crate.
+- To test a release before it is tagged, apply the version bump in a
+  throwaway `git worktree`, build the SRPMs with `rpmbuild -bs` from the
+  local crates, and `mock --chain` them.
+
+## Report back
+
+- **Packages created or updated,** with versions and build stages from `order`.
+- **Each Cargo.toml edit and each disabled test,** one line each, with the reason.
+- **What was verified:** trial, srpm/prep, mock. Say plainly when mock was not
+  run.
+- **Open decisions** the user must make: UPDATE of Fedora packages, default
+  features, compat packages.
