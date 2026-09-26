@@ -145,7 +145,9 @@ the crate directory. For a version that is not on crates.io yet:
 
 - **Packages created or updated,** with versions and build stages from `order`.
 - **Each Cargo.toml edit and each disabled test,** one line each, with the reason.
-- **What was verified:** trial, srpm/prep, mock. Say plainly when mock was not
-  run.
+- **What was verified:** trial, srpm/prep, mock, fedora-review. Say plainly
+  when mock or the review was not run.
+- **Review findings:** each `[!]` fixed or left open, and the package-specific
+  answers to the manual review items.
 - **Open decisions** the user must make: UPDATE of Fedora packages, default
   features, compat packages.
