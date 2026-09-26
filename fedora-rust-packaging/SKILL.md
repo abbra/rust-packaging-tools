@@ -214,6 +214,13 @@ the crate directory. For a version that is not on crates.io yet:
 
 ## Report back
 
+Make every bug and build a link the user can open: write Bugzilla tickets
+as `[2536992](https://bugzilla.redhat.com/2536992)`, comments as
+`[#3](https://bugzilla.redhat.com/show_bug.cgi?id=2536992#c3)`, COPR builds
+as `[10916293](https://copr.fedorainfracloud.org/coprs/build/10916293)`, and
+Koji builds and tasks with their `buildinfo`/`taskinfo` URL. `rust-deps`
+prints these URLs; never report a bare bug or build number.
+
 - **Packages created or updated,** with versions and build stages from `order`.
 - **Each Cargo.toml edit and each disabled test,** one line each, with the reason.
 - **What was verified:** trial, srpm/prep, mock, fedora-review. Say plainly
