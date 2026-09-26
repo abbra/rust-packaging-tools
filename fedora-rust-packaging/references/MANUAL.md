@@ -112,7 +112,7 @@ hold:
 | `srpm CRATE…\|--all [--no-prep]` | Run `spectool -g` and `rpmbuild -bs`, then `rpmbuild -bp` (patches apply, license copy works) and `rpmlint`. |
 | `order CRATE…\|--all [--json]` | Print build stages. Each stage depends only on earlier stages and on Fedora. |
 | `mock-chain CRATE…\|--all [-r CHROOT] [-n]` | Run `mock --chain` over the SRPMs in dependency order. |
-| `copr CRATE…\|--all --project P [-r CHROOT]… [-n]` | Submit to COPR. Each stage is chained after the previous one with `--after-build-id`. |
+| `copr CRATE…\|--all --project P [-r CHROOT]… [-n] [--wait]` | Submit to COPR. Each stage is chained after the previous one with `--after-build-id`. With `--wait`, watch the builds until they finish and fail if any failed. |
 | `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…]` | Show packaged version vs. crates.io vs. Fedora, and whether a patch and an SRPM exist. |
