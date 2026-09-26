@@ -1687,11 +1687,14 @@ def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -
 
 
 def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
-                         pkg: LocalPackage | None = None) -> str:
+                         pkg: LocalPackage | None = None,
+                         prev: dict | None = None, record: dict | None = None) -> str:
     """Print the state of one review ticket; return the next step.
 
     With a local package, also compare the posted SRPM with it and phrase the
-    next steps with rust-deps commands.
+    next steps with rust-deps commands.  With prev (the record of an earlier
+    check), report what changed since and mark new comments; record is filled
+    with what the next check compares against.
     """
     url = f"https://{BUGZILLA_HOST}/show_bug.cgi?id={bug['id']}"
     submitter = bug["creator_detail"]["name"] if "creator_detail" in bug else bug["creator"]
@@ -1703,6 +1706,12 @@ def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
          + (f" by {setter}" if setter else "")
          + ("; no reviewer yet" if reviewer == "nobody" else f"; reviewer {reviewer}")
          + f"; last change {bug['last_change_time'][:10]}")
+    if prev:
+        changed = [f"{k} {prev.get(k) or '-'} -> {v or '-'}"
+                   for k, v in (("status", status), ("fedora-review", flag), ("reviewer", reviewer))
+                   if prev.get(k, v) != v]
+        if changed:
+            info(f"   changed since the check on {prev['checked'][:10]}: {'; '.join(changed)}")
     if bug.get("whiteboard"):
         info(f"   whiteboard: {bug['whiteboard']}")
     if FE_NEEDSPONSOR in bug.get("blocks", []):
@@ -1723,11 +1732,17 @@ def review_ticket_report(bug: dict, rpm_name: str, show: int, log: Path,
     log.write_text("".join(f"=== #{c['count']} {c['creator']} {c['time']}\n{c['text']}\n\n" for c in comments))
     last_own = max((i for i, c in enumerate(comments) if c["creator"] == submitter), default=0)
     unanswered = [c for c in comments[last_own + 1:] if c["creator"] not in BZ_BOTS]
+    seen = prev.get("comments", 0) if prev else len(comments)
+    if prev and len(comments) > seen:
+        info(f"   {len(comments) - seen} new comment(s) since the check on {prev['checked'][:10]}")
+    if record is not None:
+        record.update(status=status, **{"fedora-review": flag}, reviewer=reviewer, comments=len(comments))
     if unanswered:
         info(f"   {len(unanswered)} comment(s) since the submitter's last one (all comments: {log}):")
         for c in unanswered[-show:]:
             lines = c["text"].strip().splitlines()
-            info(f"   --- #{c['count']} {c['creator']} {c['time'][:10]}")
+            info(f"   --- #{c['count']} {c['creator']} {c['time'][:10]}"
+                 + (" [new]" if c["count"] >= seen else ""))
             info(textwrap.indent("\n".join(lines[:40]), "      "))
             if len(lines) > 40:
                 info(f"      [... {len(lines) - 40} more lines in {log}]")
@@ -1818,7 +1833,58 @@ def review_bot_result(pkg: LocalPackage | None, comments: list[dict], submitter:
     return "fix the issues the review bot found ([!] above)" if left else None
 
 
+def user_review_bugs(user: str, include_closed: bool) -> list[dict]:
+    """Package Review tickets filed by a Bugzilla user, newest first."""
+    bugs, offset = [], 0
+    while True:
+        query = urllib.parse.urlencode({"product": "Fedora", "component": "Package Review", "creator": user,
+                                        "include_fields": BUG_FIELDS, "order": "bug_id DESC",
+                                        "limit": 100, "offset": offset})
+        page = bz_rest(f"bug?{query}")["bugs"]
+        bugs += page
+        if len(page) < 100:
+            break
+        offset += 100
+    return [b for b in bugs if b.get("creator_detail", {}).get("name", user) == user
+            and (include_closed or b["status"] != "CLOSED")]
+
+
+def review_status_user(user: str, include_closed: bool, show: int) -> None:
+    """Report every review ticket filed by user; keep state in the cache."""
+    cache = CACHE_DIR / "review-status" / user
+    cache.mkdir(parents=True, exist_ok=True)
+    state_file = cache / "state.json"
+    old = json.loads(state_file.read_text()) if state_file.exists() else {}
+    bugs = user_review_bugs(user, include_closed)
+    if not bugs:
+        info(f"no {'' if include_closed else 'open '}review tickets filed by {user}")
+        return
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    new, summary = {}, []
+    for bug in bugs:
+        m = re.match(r"Review Request:\s*(\S+)", bug["summary"])
+        rpm_name = m.group(1) if m else f"bug-{bug['id']}"
+        prev = old.get(str(bug["id"]))
+        record: dict = {}
+        nxt = review_ticket_report(bug, rpm_name, show, cache / f"{bug['id']}-{rpm_name}.txt",
+                                   prev=prev, record=record)
+        info(f"   next: {nxt}")
+        fresh = prev is None or any(prev.get(k) != record.get(k) for k in record)
+        new[str(bug["id"])] = {**record, "package": rpm_name, "next": nxt, "checked": now}
+        summary.append((str(bug["id"]), rpm_name, nxt, fresh))
+    state_file.write_text(json.dumps({**old, **new}, indent=2) + "\n")
+    info(f"\nsummary for {user} ('*' = new or changed since the last check; state in {cache}):")
+    w1, w2 = max(len(b) for b, *_ in summary), max(len(n) for _, n, *_ in summary)
+    for bug_id, name, nxt, fresh in summary:
+        info(f" {'*' if fresh else ' '} {bug_id.ljust(w1)}  {name.ljust(w2)}  {nxt}")
+
+
 def cmd_review_status(args) -> None:
+    if args.user:
+        if args.crates or args.all:
+            die("--user reports the tickets of a Bugzilla user; do not name crates with it")
+        review_status_user(args.user, args.closed, args.comments)
+        return
     pkgs = select(args.root, args.crates, args.all)
     if all(p.crate_file and p.crate_file.exists() for p in pkgs):
         pkgs = [p for s in build_stages(pkgs, args.root) for p in s]  # dependency order
@@ -1995,6 +2061,10 @@ def main() -> None:
                     help="show up to N unanswered comments per ticket (default %(default)s)")
     sp.add_argument("--record", action="store_true",
                     help="record tickets found by summary search in review-request.json")
+    sp.add_argument("--user", metavar="LOGIN",
+                    help="report all review tickets filed by this Bugzilla user (e.g. a FAS name) instead; "
+                         "state and threads are kept in ~/.cache/rust-packaging-tools/review-status/LOGIN")
+    sp.add_argument("--closed", action="store_true", help="with --user: include closed tickets")
     sp.set_defaults(func=cmd_review_status)
 
     sp = sub.add_parser("doctor", help="check that the required tools are installed")
