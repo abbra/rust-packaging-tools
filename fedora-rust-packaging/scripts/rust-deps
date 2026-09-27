@@ -414,9 +414,21 @@ def apply_edits(text: str, edits: dict) -> str:
     regular = set(re.findall(r"(?m)^\[(?:target\.(?:'[^']*'|\"[^\"]*\")\.)?(?:dependencies|build-dependencies)\.\"?([^\]\"]+)", text))
     feature_refs = drop_dep | (drop_dev - regular)
 
+    # dropped features stay in the code as #[cfg(feature = "...")]: declare them
+    # as expected cfg values, or rustc warns about each use (unexpected_cfgs)
+    orig = tomllib.loads(text)
+    dropped = sorted(drop_feat & set(orig.get("features", {})))
+    lint = orig.get("lints", {}).get("rust", {}).get("unexpected_cfgs")
+    lint = {"level": lint} if isinstance(lint, str) else dict(lint or {"level": "warn"})
+    declare = bool(dropped) and lint.get("level") != "allow"
+
     out = []
     for block in re.split(r"\n(?=\[)", text):
         header = block.split("\n", 1)[0].strip()
+        if declare and header == "[lints.rust.unexpected_cfgs]":
+            continue  # written again below, with the dropped features
+        if declare and header == "[lints.rust]":
+            block = re.sub(r"(?m)^unexpected_cfgs\s*=.*\n?", "", block)
         m = re.match(
             r"""^\[(?:target\.(?:'[^']*'|"[^"]*")\.)?(dev-dependencies|dependencies|build-dependencies)\.([^\]]+)\]$""",
             header,
@@ -448,6 +460,12 @@ def apply_edits(text: str, edits: dict) -> str:
         text = text.rstrip("\n") + "\n"
         for name, ver in add_dev.items():
             text += f'\n[dev-dependencies.{name}]\nversion = "{ver}"\n'
+    if declare:
+        values = ", ".join(json.dumps(f) for f in dropped)
+        checks = [json.dumps(c) for c in lint.get("check-cfg", [])] + [f"'cfg(feature, values({values}))'"]
+        text = text.rstrip("\n") + "\n\n[lints.rust.unexpected_cfgs]\n" + "".join(
+            f"{k} = {json.dumps(v)}\n" for k, v in lint.items() if k != "check-cfg")
+        text += "check-cfg = [\n" + "".join(f"    {c},\n" for c in checks) + "]\n"
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
@@ -484,6 +502,10 @@ def editor_mode(toml_path: str) -> None:
     p.write_text(apply_edits(p.read_text(), edits))
 
 
+CHECK_CFG_COMMENT = ("declare the dropped features as expected cfg values (lints.rust.unexpected_cfgs), "
+                     "so rustc does not warn about the code that still tests them")
+
+
 def describe_edits(edits: dict) -> list[str]:
     """Default cargo-toml-patch-comments for a set of edits."""
     out = []
@@ -493,6 +515,7 @@ def describe_edits(edits: dict) -> list[str]:
         out.append(f"drop optional dependencies not packaged in Fedora: {', '.join(v)}")
     if v := edits.get("drop-features"):
         out.append(f"drop features that need unpackaged crates: {', '.join(v)}")
+        out.append(CHECK_CFG_COMMENT)
     if v := edits.get("add-default-features"):
         out.append(f"enable by default instead: {', '.join(v)}")
     if v := edits.get("set-version"):
@@ -1058,6 +1081,11 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         action(f"{pkg.crate}: generated Summary is too long; set package.summary in rust2rpm.toml and regen")
     if edits and not manual.exists():
         warn(f"{pkg.crate}: {EDITS_FILE} produced no changes to Cargo.toml")
+    comments = tomllib.loads(pkg.config_file.read_text()).get("package", {}).get("cargo-toml-patch-comments", [])
+    if (manual.exists() and "unexpected_cfgs" in manual.read_text()
+            and not any("unexpected_cfgs" in c or "cfg value" in c for c in comments)):
+        action(f"{pkg.crate}: the patch declares the dropped features as expected cfg values; add to "
+               f"cargo-toml-patch-comments in rust2rpm.toml: \"{CHECK_CFG_COMMENT}\"")
     specs = sorted(pkg.dir.glob("rust-*.spec"), key=lambda f: f.stat().st_mtime)
     for old in specs[:-1]:  # e.g. the regular spec after --compat, or rust-foo0.1 after an update
         info(f"   removing {old.name} (now {specs[-1].name})")
@@ -1948,9 +1976,13 @@ def explain_warning(msg: str, pkg: LocalPackage) -> str | None:
     if m := re.match(r"unexpected `cfg` condition value: `([^`]+)`", msg):
         dropped = load_edits(pkg.edits_file).get("drop-features", [])
         if m.group(1) in dropped:
+            patch = pkg.dir / f"{pkg.crate}-fix-metadata.diff"
+            now = ("the local patch declares it now; rebuild to silence it" if patch.exists()
+                   and "unexpected_cfgs" in patch.read_text() else "'regen' declares it; regen, srpm, rebuild")
             return (f"{EDITS_FILE} drops feature '{m.group(1)}', but the code still has "
-                    f"#[cfg(feature = \"{m.group(1)}\")]; that code is compiled out, as with the feature "
-                    "off. Keep the drop: an empty feature would give a -devel subpackage that cannot build")
+                    f"#[cfg(feature = \"{m.group(1)}\")], compiled out as with the feature off. This build's "
+                    f"patch does not declare it as an expected cfg value: {now}. Do not keep an empty "
+                    "feature instead: it would give a +feature-devel subpackage that cannot build")
         return "the code tests a cfg value its Cargo.toml does not declare; an upstream lint, harmless"
     if re.match(r"unexpected `cfg` condition name: `(docsrs|docsrs_\w+|nightly|coverage\w*|fuzzing|loom)`", msg):
         return "a cfg for docs.rs, nightly or test tooling; never set in Fedora builds"

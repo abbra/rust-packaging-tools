@@ -185,6 +185,15 @@ Dropping a dependency or feature also removes every reference to it from
 `[features]`. That includes references to dropped dev-dependencies, which some
 crates list in features.
 
+The code keeps its `#[cfg(feature = "…")]` for a dropped feature; it is
+compiled out, as with the feature off. So that rustc does not warn about each
+of them (`unexpected cfg condition value`), the patch also declares the
+dropped features as expected values in `[lints.rust.unexpected_cfgs]
+check-cfg`, merged with what the crate already has there. Do not keep an empty
+feature instead: rust2rpm would generate a `+<feature>-devel` subpackage whose
+code cannot build without the dropped dependency. `init` drafts the comment
+for this edit; `regen` asks for it when it is missing.
+
 **Every edit must be explained** in `rust2rpm.toml`, under
 `[package] cargo-toml-patch-comments`. rust2rpm puts those comments in the
 spec, and it refuses to run if comments exist without a patch. `init` writes
@@ -446,7 +455,7 @@ running builds too. Warnings do not fail a build. Those it knows:
 
 | warning | why it is expected |
 |---|---|
-| ``unexpected `cfg` condition value: `F` `` where `cargo-toml-edits.toml` drops feature `F` | The code keeps `#[cfg(feature = "F")]`, which is now never set, so that code is compiled out, as with the feature off. Keep the drop: an empty feature `F = []` would make rust2rpm generate a `+F-devel` subpackage that cannot build. |
+| ``unexpected `cfg` condition value: `F` `` where `cargo-toml-edits.toml` drops feature `F` | Built from a patch that did not declare `F` as an expected cfg value yet (see "`cargo-toml-edits.toml`"): `regen`, `srpm`, rebuild. The code under `#[cfg(feature = "F")]` is compiled out either way. |
 | ``unexpected `cfg` condition value`` (other) or ``condition name: `docsrs` `` | Upstream lints about cfgs for docs.rs, nightly or test tooling. |
 | `File listed twice: /usr/share/cargo/registry/…` | rust2rpm lists `%doc`/`%license` files inside the crate directory, which `%files` also owns whole. |
 | `/etc/hosts created as /etc/hosts.rpmnew`, `no (git) VCS found` | mock's buildroot setup; cargo outside a git checkout. |
