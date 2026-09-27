@@ -53,7 +53,9 @@ current directory. The tool itself can live anywhere.
     ├── jsonschema-fix-metadata-auto.diff   GENERATED (rust2rpm drops foreign deps)
     ├── jsonschema-fix-metadata.diff        GENERATED from cargo-toml-edits.toml
     ├── jsonschema-0.58.0.crate
-    └── rust-jsonschema-0.58.0-1.fc45.src.rpm
+    ├── rust-jsonschema-0.58.0-1.fc45.src.rpm
+    ├── .fmf/version, plans/rust-deps.fmf  GENERATED tmt plan (see "tmt tests")
+    └── tests/rust-deps/                   GENERATED tmt tests
 ```
 
 You edit only `rust2rpm.toml` and `cargo-toml-edits.toml` (and
@@ -132,6 +134,7 @@ hold:
 | `check-targets CRATE…\|--all (-r CHROOT…\|--project P) [-q] [--refresh]` | Read-only; no COPR build needed. For each package and target release (the `-r` chroots, or all chroots of the COPR project; `targets.toml` respected), generate the BuildRequires as rust2rpm does (`cargo2rpm buildrequires` with the spec's feature flags, dev-dependencies unless `%check` is off) and check each: a local package built for that target, with the version and the features asked for, or the target's repositories. Also checks that each feature subpackage could be installed: every `dep/feature` a feature refers to must exist in the target, or in the local package (a feature dropped from a local dependency must be dropped from its dependents too). Notes where a local package shadows other versions the target ships. Fails if anything would not resolve. See "COPR build failures". |
 | `copr-status CRATE…\|--all --project P [-r CHROOT]… [--json] [--refresh] [--wait [--interval S]]` | Read-only. For the latest COPR build of each package's current version, show every chroot's result, and for each failure the reason from the build log: each missing BuildRequires, checked against the local packages and their builds and against the target's repositories, or the compile and test errors. Ends with the next steps. Logs are cached in `~/.cache/rust-packaging-tools/copr-logs/`. For build errors it prints the `copr-log` and `mock-chain` commands to look closer. `--wait` polls until nothing is building (run it in the background). See "COPR build failures". |
 | `copr-log CRATE -r CHROOT --project P [--grep RE \| --tail N] [--errors N]` | Read-only. Fetch the log of the newest build of the package's current version in that chroot (a running build's live log too) and summarize it: missing BuildRequires, error lines, and warnings grouped, each known one explained (see "Reading a build log"). `--grep` and `--tail` print log lines instead. |
+| `tmt CRATE…\|--all --project P [-r CHROOT] [-n]` | Run the package's generated tmt tests (see "tmt tests") in a container of that Fedora release (default `fedora-rawhide-x86_64`), with the COPR project's repository enabled, as Fedora CI will run them in dist-git. Needs `tmt` with container provisioning (`dnf install tmt+provision-container`) and podman. |
 | `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
 | `review-request CRATE…\|--all --project P --fas NAME [-r CHROOT] [--needs-sponsor] [--comment TEXT] [--koji-task CRATE=TASK]… [--file]` | Prepare the Bugzilla review request of each package, in dependency order, from its latest succeeded COPR build (chroot default `fedora-rawhide-x86_64`). Requires a passing `review` of the current SRPM and a published spec identical to the local one. Writes `review-request.txt`. `--koji-task` adds a link to a successful Koji scratch build of that crate's SRPM (checked through Koji). With `--file`, files it (or, if already filed, posts the new Spec/SRPM URLs) and records the bug in `review-request.json`. See "Submitting to Fedora". |
 | `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
@@ -350,7 +353,9 @@ After approval (`fedora-review+`, ticket assigned to the reviewer):
 ```
 fedpkg request-repo rust-<crate> <bug>       # needs a forge token in ~/.config/rpkg/fedpkg.conf
 fedpkg clone rust-<crate> && cd rust-<crate> # once the fedora-scm-requests ticket is closed
-fedpkg import <path to the SRPM> && git commit && git push
+fedpkg import <path to the SRPM>
+cp -a <package dir>/.fmf <package dir>/plans <package dir>/tests . && git add .fmf plans tests
+git commit && git push
 fedpkg build
 ```
 
@@ -360,6 +365,29 @@ building a stage, wait until the previous stage is in the buildroot
 branches, build there and create Bodhi updates. Close the review ticket with
 resolution `NEXTRELEASE` once the package is built (or let Bodhi close it), and
 add the package to release monitoring.
+
+## tmt tests
+
+`regen` also writes tmt tests next to the spec, for Fedora CI: once the files
+are in dist-git, Testing Farm runs them on every pull request (and they gate
+nothing unless you add `gating.yaml`). Like the spec, they are generated from
+the spec and `rust2rpm.toml`; do not edit them.
+
+| test | what it checks | runs when |
+|---|---|---|
+| `/subpackages` | every `-devel` subpackage installs (a feature whose dependency or dependency feature is missing breaks its `+feature-devel`) | the crate has a library |
+| `/features` | a crate that depends on it builds (`cargo check`, offline, from `/usr/share/cargo/registry`) without features and with each feature alone | the crate has a library |
+| `/upstream-tests` | the crate's own tests, from the installed sources, with `%cargo_prep` and the spec's own `%cargo_test` commands, so the same skips apply; the test BuildRequires are installed as the spec lists them | `%check` runs |
+| `/executables` | each executable starts: `--help` or `--version` | there is a binary package |
+
+Run them before import, against the COPR builds:
+
+```
+$T tmt --all --project user/project -r fedora-45-x86_64
+```
+
+When the package is imported, commit `.fmf/`, `plans/` and `tests/` to
+dist-git with it (`fedpkg import` takes only what the SRPM contains).
 
 ## COPR build failures
 

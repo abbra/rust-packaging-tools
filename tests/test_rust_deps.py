@@ -255,3 +255,63 @@ def test_summarize_log(tmp_path):
     [(msg, count, locs, why)] = warnings  # the "generated 1 warning" summary line is not one
     assert msg == "unexpected `cfg` condition value: `macros`" and count == 1
     assert locs == ["src/lib.rs:3:17"] and "macros" in why
+
+
+# ─── tmt tests (Fedora CI) ──────────────────────────────────────────────────
+
+def tmt_info(**kw) -> "rd.TmtInfo":
+    base = dict(rpm_name="rust-zmij", crate="zmij", version="1.0.23",
+                devel=["rust-zmij-devel", "rust-zmij+default-devel", "rust-zmij+no-panic-devel"],
+                features=["default", "no-panic"], binaries=[],
+                check_commands=["%cargo_test -- --lib", "%cargo_test -- --doc"],
+                test_requires=["cargo-rpm-macros", "(crate(rand/default) >= 0.9.0 with crate(rand/default) < 0.10.0~)"])
+    return rd.TmtInfo(**{**base, **kw})
+
+
+def fmf(text: str) -> dict:
+    yaml = pytest.importorskip("yaml")
+    return yaml.safe_load(text)
+
+
+def test_render_tmt_library():
+    files = rd.render_tmt(tmt_info())
+    assert files[".fmf/version"] == "1\n"
+    plan = fmf(files["plans/rust-deps.fmf"])
+    assert plan["discover"] == {"how": "fmf", "filter": "tag: rust-deps"}
+    tests = fmf(files["tests/rust-deps/main.fmf"])
+    assert set(tests) >= {"/subpackages", "/features", "/upstream-tests"} and "/executables" not in tests
+    assert tests["/features"]["environment"] == {"CRATE": "zmij", "VERSION": "1.0.23", "FEATURES": "default no-panic"}
+    # dnf takes the rich dependencies as they are
+    assert "(crate(rand/default) >= 0.9.0 with crate(rand/default) < 0.10.0~)" in tests["/upstream-tests"]["require"]
+    assert files["tests/rust-deps/check-commands"] == "%cargo_test -- --lib\n%cargo_test -- --doc\n"
+    for script in ("features.sh", "upstream-tests.sh"):
+        assert files[f"tests/rust-deps/{script}"].startswith("#!/usr/bin/bash\n")
+
+
+def test_render_tmt_without_tests_or_library():
+    files = rd.render_tmt(tmt_info(check_commands=[], test_requires=[]))
+    assert "/upstream-tests" not in fmf(files["tests/rust-deps/main.fmf"])
+    assert "tests/rust-deps/check-commands" not in files
+    app = rd.render_tmt(tmt_info(devel=[], features=[], binaries=["synta-tools"], check_commands=[]))
+    assert set(fmf(app["tests/rust-deps/main.fmf"])) >= {"/executables"}
+    assert "/features" not in fmf(app["tests/rust-deps/main.fmf"])
+
+
+def test_write_tmt_replaces_earlier_files(tmp_path, monkeypatch):
+    pkg = rd.LocalPackage("zmij", tmp_path, "1.0.23")
+    stale = tmp_path / "tests" / "rust-deps" / "executables.sh"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("old")
+    monkeypatch.setattr(rd, "tmt_info", lambda p: tmt_info())
+    rd.write_tmt(pkg)
+    assert not stale.exists()
+    assert (tmp_path / "tests/rust-deps/features.sh").stat().st_mode & 0o111
+    assert (tmp_path / "plans/rust-deps.fmf").exists()
+
+
+@pytest.mark.parametrize("chroot, image", [
+    ("fedora-45-x86_64", "registry.fedoraproject.org/fedora:45"),
+    ("fedora-rawhide-aarch64", "registry.fedoraproject.org/fedora:rawhide"),
+])
+def test_tmt_image(chroot, image):
+    assert rd.tmt_image(chroot) == image
