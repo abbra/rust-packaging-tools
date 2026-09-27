@@ -1402,6 +1402,8 @@ def copr_submit(plan: list[list[tuple[LocalPackage, list[str]]]], project: str, 
                     die(f"cannot parse build id:\n{res.stdout}")
                 bid = m[-1]
             info(f"   {p.crate}: build {bid if dry_run else link(copr_build_url(bid), bid)}")
+            if not dry_run:
+                record_copr_build(project, p.crate, int(bid))
             ids.append(bid)
             first = first or bid
         after = first
@@ -1438,6 +1440,19 @@ CRATE_REQ_RE = re.compile(r"crate\(([^/)\s]+)(?:/([^)\s]+))?\)(?:\s*(>=|=|>)\s*(
                           r"(?:\s+with\s+crate\([^)]*\)\s*<\s*([^\s)]+))?")
 BUILD_ERROR_RE = re.compile(r"^(error(\[E\d+\])?: .*|test result: FAILED.*|thread '.*' panicked at .*"
                             r"|---- \S+ stdout ----|error: Bad exit status.*)$")
+
+
+def copr_builds_file(project: str, crate: str) -> Path:
+    return CACHE_DIR / "copr-builds" / project.replace("/", "_") / f"{crate}.json"
+
+
+def record_copr_build(project: str, crate: str, build_id: int) -> None:
+    """Remember a submitted build: COPR files it under its package only after
+    importing the SRPM, so until then a package's build list misses it."""
+    f = copr_builds_file(project, crate)
+    ids = json.loads(f.read_text()) if f.exists() else []
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(sorted(set(ids) | {build_id})[-20:]))
 
 
 def copr_api(path: str, **params) -> dict:
@@ -1540,6 +1555,14 @@ class CoprState:
                              packagename=f"rust-{pkg.crate}", limit=100)["items"]
         except urllib.error.HTTPError:
             items = []
+        f = copr_builds_file(self.project, pkg.crate)
+        known = {b["id"] for b in items}
+        for bid in (json.loads(f.read_text()) if f.exists() else []):
+            if bid not in known and bid > max(known, default=0):
+                try:
+                    items.append(copr_api(f"build/{bid}"))
+                except urllib.error.HTTPError:
+                    pass  # deleted
         return [b for b in sorted(items, key=lambda b: b["id"], reverse=True)
                 if (b.get("source_package") or {}).get("version") == evr
                 or ((b.get("source_package") or {}).get("version") is None and b["state"] in COPR_ACTIVE)]
