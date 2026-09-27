@@ -930,10 +930,14 @@ def sys_hint(toml: dict) -> str | None:
     """A reason to add system Build/Requires, for crates that link C libraries."""
     links = toml.get("package", {}).get("links")
     if links:
-        # e.g. pyo3 (links = "pyo3-python") gets libpython through pyo3-ffi (links = "python"),
-        # whose -devel package requires it
+        # A required dependency that links the same library brings its system package: pyo3
+        # (links = "pyo3-python") gets libpython through pyo3-ffi (links = "python"), whose
+        # -devel requires python3-devel.  Only the same library counts: a dependency linking
+        # another one (a libgit2 crate depending on libz-sys) says nothing about this one.
+        parts = set(re.split(r"[-_]", links))
         for d in manifest_deps(toml):
-            if d["kind"] == "normal" and not d["optional"] and crate_links(d["crate_id"], d["req"]):
+            if d["kind"] == "normal" and not d["optional"] and (dl := crate_links(d["crate_id"], d["req"])) \
+                    and (dl == links or dl in parts):
                 links = None
                 break
     bdeps = sorted(d for d in toml.get("build-dependencies", {}) if d in SYS_BUILD_DEPS)
