@@ -1569,6 +1569,12 @@ def cmd_mock_chain(args) -> None:
     stages = build_stages(select(args.root, args.crates, args.all), args.root)
     srpms = [str(srpm_of(p)) for s in stages for p in s]
     repo = Path(args.localrepo or (CACHE_DIR / "mock-repo"))
+    if not args.dry_run:
+        # mock --chain skips a package whose NVR it built before; a changed spec keeps its NVR
+        for s in srpms:
+            for old in (repo / "results" / args.chroot).glob(Path(s).name.removesuffix(".src.rpm")):
+                info(f"   rebuilding {old.name}: removing the earlier result")
+                shutil.rmtree(old)
     cmd = ["mock", "-r", args.chroot, "--chain", "--localrepo", str(repo), *srpms]
     info("$ " + " ".join(cmd))
     if args.dry_run:
