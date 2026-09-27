@@ -4,7 +4,7 @@ description: Package Rust crates for Fedora with rust2rpm, including every depen
 compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
 argument-hint: "<crate>[@ver]… | --manifest <Cargo.toml> | <rust-deps command> [args] [--root <dir>]"
 metadata:
-  version: "1.12"
+  version: "1.13"
 ---
 
 # Fedora Rust crate packaging
@@ -185,9 +185,10 @@ Read them as follows (forms can be combined with `--root <dir>`):
        resubmit with `copr -r <chroot>`.
      - **Warnings** the user asks about (in a running or finished build):
        `$T copr-log <crate> -r <chroot> --project <p>` explains the known
-       ones, e.g. `unexpected cfg` for a feature dropped in
-       `cargo-toml-edits.toml` is expected; do not "fix" it with an empty
-       feature.
+       ones. `unexpected cfg` for a feature dropped in `cargo-toml-edits.toml`
+       means the package was built before `regen` declared dropped features as
+       expected cfg values: regen, srpm, rebuild. Never "fix" it with an empty
+       feature (its `+feature-devel` subpackage could not build).
      - Repeat `copr-status` until the chroots the user needs are all `ok`.
 7. **Review:** after `mock-chain` succeeded, run `$T review --all -r <same
    chroot>` (in the background; it rebuilds every package in mock). It runs
