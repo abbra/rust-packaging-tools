@@ -42,7 +42,7 @@ Read them as follows (forms can be combined with `--root <dir>`):
 - **a `rust-deps` command** with its arguments (`status`, `resolve …`,
   `trial <crate>`, `srpm --all`, `review --all -r <chroot>`,
   `check-targets --all --project <owner/project>`,
-  `copr-status --all --project <owner/project>`,
+  `copr-status --all --project <owner/project>`, `copr-log <crate> -r <chroot> --project <p>`,
   `review-status --all`, `review-status --user <login>`, …): run only that
   step and report its result.
 - **`--root <dir>`**: the packages root (see Setup).
@@ -172,8 +172,14 @@ Read them as follows (forms can be combined with `--root <dir>`):
        optional features whose crates the target lacks; if a consumer needs
        such a feature (e.g. `strum/derive`), package that crate as well and
        remove the drop.
-     - `FAILED`: read the cached log it names, reproduce with `mock-chain -r
-       <chroot>`, fix, and resubmit with `copr -r <chroot>`.
+     - `FAILED`: summarize the log with `copr-log`, reproduce with
+       `mock-chain -r <chroot>` (`centos-stream+epel-N` for `rhel+epel-N`),
+       fix, and resubmit with `copr -r <chroot>`.
+     - **Warnings** the user asks about (in a running or finished build):
+       `$T copr-log <crate> -r <chroot> --project <p>` explains the known
+       ones, e.g. `unexpected cfg` for a feature dropped in
+       `cargo-toml-edits.toml` is expected; do not "fix" it with an empty
+       feature.
      - Repeat `copr-status` until the chroots the user needs are all `ok`.
 7. **Review:** after `mock-chain` succeeded, run `$T review --all -r <same
    chroot>` (in the background; it rebuilds every package in mock). It runs
