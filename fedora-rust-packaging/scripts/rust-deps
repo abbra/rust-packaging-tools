@@ -3363,12 +3363,15 @@ def git(checkout: Path, *args: str, check: bool = True) -> subprocess.CompletedP
     return res
 
 
-def prepare_update(pkg: LocalPackage, top: Path, branch: str, dry_run: bool) -> bool:
-    """A local commit in a dist-git checkout that updates the Fedora package to the local packaging."""
+def prepare_update(pkg: LocalPackage, top: Path, branch: str | None, dry_run: bool) -> bool:
+    """A local commit in a dist-git checkout that updates the Fedora package to the local packaging,
+    on the branch it was adopted from unless 'branch' names another."""
     dg = pkg.dist_git or {}
     if not dg:
         action(f"{pkg.crate}: not adopted from dist-git; run 'adopt {pkg.crate}' first")
         return False
+    adopted = dg.get("branch", "rawhide")
+    branch = branch or adopted
     if dg.get("packaging") == "local":
         action(f"{pkg.crate}: marked with --mark-only, its packaging is for other targets; to propose "
                f"it to Fedora, 'adopt {pkg.crate}' without --mark-only")
@@ -3389,7 +3392,11 @@ def prepare_update(pkg: LocalPackage, top: Path, branch: str, dry_run: bool) -> 
         info(f"   would prepare branch update-{pkg.version} of {checkout} from origin/{branch}")
         return True
     head = git(checkout, "rev-parse", f"origin/{branch}").stdout.strip()
-    if dg.get("commit") and head != dg["commit"]:
+    if branch != adopted:
+        # the recorded commit is on another branch: nothing to compare with
+        warn(f"{pkg.crate}: adopted from dist-git {adopted}, updating {branch} as asked; "
+             f"its packaging may differ from {adopted}'s")
+    elif dg.get("commit") and head != dg["commit"]:
         log = git(checkout, "log", "--oneline", f"{dg['commit']}..{head}", check=False).stdout.strip()
         action(f"{pkg.crate}: dist-git {branch} moved since 'adopt' ({dg['commit'][:10]} -> {head[:10]}):\n"
                + textwrap.indent(log or "(history rewritten)", "      ")
@@ -4068,7 +4075,8 @@ def main() -> None:
                         "or with --push, in your fork (public)")
     with_sel(sp)
     sp.add_argument("--dir", type=Path, help=f"where the dist-git checkouts are (default: ${DIST_GIT_ENV})")
-    sp.add_argument("--branch", default="rawhide", help="dist-git branch to update (default %(default)s)")
+    sp.add_argument("--branch", help="dist-git branch to update (default: the one each package was adopted "
+                    "from, in its dist-git.toml)")
     sp.add_argument("--push", action="store_true",
                     help="fork the repository (once), upload the sources to the lookaside cache, and push the "
                          "prepared branch to the fork; prints the link to open the pull request")

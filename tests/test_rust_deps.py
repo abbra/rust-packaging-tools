@@ -512,3 +512,31 @@ def test_prepare_update_refuses_when_dist_git_moved(tmp_path, monkeypatch):
     assert rd.prepare_update(rd.local_packages(root)["zmij"], top, "rawhide", False) is False
     assert "moved since 'adopt'" in actions[0] and "two" in actions[0]
     assert not (d / rd.UPDATE_STATE).exists()
+
+
+def test_prepare_update_uses_the_adopted_branch(tmp_path, monkeypatch):
+    import subprocess
+    def sh(*args, cwd):
+        return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    sh("git", "init", "-q", "-b", "rawhide", cwd=upstream)
+    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "one", cwd=upstream)
+    sh("git", "branch", "f45", cwd=upstream)
+    adopted = sh("git", "rev-parse", "f45", cwd=upstream)
+    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "two", cwd=upstream)
+    top = tmp_path / "dist-git"
+    top.mkdir()
+    sh("git", "clone", "-q", str(upstream), "rust-zmij", cwd=top)
+    root = tmp_path / "root"
+    root.mkdir()
+    d = make_package(root, "zmij", "rust-zmij", "1.0.23")
+    (d / rd.DIST_GIT_FILE).write_text(f'package = "rust-zmij"\nbranch = "f45"\ncommit = "{adopted}"\n')
+    actions = []
+    monkeypatch.setattr(rd, "action", actions.append)
+    monkeypatch.setattr(rd, "update_files", lambda pkg: ({}, []))
+    pkg = rd.local_packages(root)["zmij"]
+    # f45 is where it was adopted, and it did not move (rawhide did)
+    assert rd.prepare_update(pkg, top, None, False) is False  # no files to change: nothing to commit
+    assert not any("moved since" in a for a in actions)
+    assert sh("git", "rev-parse", "HEAD", cwd=top / "rust-zmij") == adopted
