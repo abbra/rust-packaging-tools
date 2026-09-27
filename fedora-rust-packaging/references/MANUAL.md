@@ -520,6 +520,8 @@ so ask first. `copr-status` keeps the conflict `BLOCKED` until it is gone.
 | no license file in the crate … | `init` adds the upstream license as `Source10` automatically when it can find it: it tries the crate's `repository` and then `homepage` at the commit from `.cargo_vcs_info.json`, on GitHub, GitLab and any Forgejo/Gitea host (`/raw/commit/<sha>/`). "the repository/homepage URL may be stale" means that commit is not there: the crate metadata points at an old mirror or a moved project. Find the repository that has the commit (ask the user if needed). Otherwise add `license-files` and `[[package.extra-sources]]` plus `[scripts.prep] post = ["cp -pav %{SOURCE10} ."]` by hand, using the upstream commit from the crate's `.cargo_vcs_info.json`. |
 | links = …, build-dependencies [...]: build.rs probably needs a system library | The crate builds or links a C library. Read `build.rs` for the library and minimum version (e.g. `pkg_config::Config::new().atleast_version("3.0.7").probe("openssl")`) and add `[requires] build = ["pkgconfig(openssl) >= 3.0.7"]` and the same under `lib`: `build.rs` runs again when any dependent crate is built, so `-devel` must pull the headers in (as Fedora's `openssl-sys` does). Crates depending on it then need nothing extra; `regen` does not ask when a dependency links a library itself (e.g. pyo3 gets libpython through pyo3-ffi). Do not add what Fedora crates already bring (e.g. `bindgen` requires `clang-libs`; check with `dnf repoquery --requires`). |
 | F marked %doc but compiled into the crate (include_str!) | Usually `#![doc = include_str!("../README.md")]`. Documentation must be optional (it can be left out at install time), so add to `[package]`: `doc-files.exclude = ["README.md"]` with a comment such as "src/lib.rs includes it as crate documentation, so it must not be %doc". Rust reviewers ask for this. |
+| cannot compute the License of the executables | For a crate with executables, `regen` fills in the binary package's `License` from the crates linked into them (the `cargo tree` that `%cargo_license_summary` runs, online). It failed: without network, or a dependency declares only a `license-file`. Read `%cargo_license_summary` in a mock build log and ask the user how to proceed. |
+| the spec still has FIXME | rust2rpm left a placeholder. For a `cdylib` crate: ship only the crate (`cargo-install-bin = false` and `suppress-cdylib-install-fixme = true` under `[package]`); a C library needs its own packaging (soname, headers). A `cdylib`-only crate (e.g. a PyO3 extension module) has no `-devel` either: package it as a Python module instead (below). |
 | rust2rpm.toml still contains TODO comments | Replace them with the actual reason (e.g. "suite needs upstream test data that is not in the published crate"). |
 | no local fedora-review result / older than the SRPM / unexplained issues (`review-request`) | Run `review` for the package (again) and fix its `[!]` findings first. |
 | COPR project … has no package / no succeeded build / build is V, the local package is W / spec differs (`review-request`) | The COPR build must be of exactly the local spec: `srpm`, then `copr <crate> --project … --wait`. |
@@ -533,7 +535,35 @@ Typical reasons tests cannot run, and how to express them in `[tests]`:
 - **Needs network access** (mock builds have none): skip those tests with `skip.<target>`.
   Tests that only connect to a server they start on `127.0.0.1` are not network
   tests: loopback works in mock and in `trial`.
-- **Tests import the crate's own dependent** (circular, e.g. a `*_core` crate): set `run = false`.
+- **Tests import the crate's own dependent** (circular, e.g. a `*_core` crate): set `run = false`,
+  or leave only those targets out of `run`. With the tests off, the dev-dependency no longer
+  counts for the build order.
+- **Dev-dependencies stripped at publishing** (a workspace crate's tests fail to find `hex`,
+  `tempfile`, …): restore them with `[add-dev-dependencies]` from the upstream repository's
+  `Cargo.toml`; give features the workspace enabled, e.g. `rand = { version = "0.8", features = ["small_rng"] }`.
+- **Depends on the CPU** (e.g. half-precision NaN on x86-64-v3, as RHEL 10 builds): skip that
+  test and say so.
+
+`skip` as a table per target (`skip."test:codec" = [...]`) needs `run` to be a list:
+rust2rpm fails with `'TestsSkip' has no len()` otherwise. With `run` at its default, use the
+list form, `skip = ["codec::case_183"]` with `skip-exact = true`, which applies to all targets.
+
+### Python extension modules (PyO3)
+
+A PyO3 crate built with maturin is a `cdylib` only: as a Rust crate package it
+would be empty. Package the Python distribution instead, with a hand-written
+`python-<name>.spec` from the upstream source (PyPI often has only wheels):
+`%cargo_prep` and `rm Cargo.lock` in `%prep`; `%pyproject_buildrequires` plus
+`%cargo_generate_buildrequires -f <maturin features>` in the module's directory
+(workspace path dependencies come from the source tree, cargo2rpm lists only the
+external crates); `export RUSTFLAGS='%{build_rustflags}'` and `%pyproject_wheel`
+per `pyproject.toml`; `%cargo_license` into `LICENSE.dependencies`; `License`
+covering the crates linked into the module; `%pytest` in `%check`. Remove
+workspace members whose dependencies are not packaged (benchmarks, fuzzing) from
+`[workspace] members` in `%prep`. rust-deps does not manage such specs yet:
+build the SRPM with `rpmbuild -bs`, add it to the end of `mock --chain` with the
+same `--localrepo`, and submit it with `copr-cli build --after-build-id` of the
+last Rust stage.
 
 ## Packaging inside the upstream repository
 
