@@ -87,6 +87,7 @@ rust-deps trial --discover --apply jsonschema  # pick tests that can run
 rust-deps srpm --all && rust-deps mock-chain --all -r fedora-45-x86_64
 rust-deps review --all -r fedora-45-x86_64      # fedora-review, before submitting
 rust-deps copr --all --project username/repo -r fedora-rawhide-x86_64 --wait
+rust-deps resolve -r rhel+epel-10-x86_64 jsonschema     # check against another target
 rust-deps review-request --all --project username/repo --fas username   # drafts; --file files them
 rust-deps review-status --all                   # reviewer comments, next steps
 rust-deps review-status --user username              # all your review tickets, tracked in ~/.cache
