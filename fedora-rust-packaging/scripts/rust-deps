@@ -1406,17 +1406,20 @@ def cmd_srpm(args) -> None:
 
 # ─── build order, mock, copr ─────────────────────────────────────────────────
 
+def build_deps(pkg: LocalPackage) -> set[str]:
+    """Crates the package's build needs: its BuildRequires as rust2rpm generates them.
+
+    Dev-dependencies count only when %check runs, so a crate whose tests are
+    off does not need its own dependents (e.g. synta's dev-dependency on
+    synta-certificate, which depends on synta).
+    """
+    return {m.group(1) for line in build_info(pkg)[1] if (m := CRATE_REQ_RE.search(line))} - {pkg.crate}
+
+
 def local_deps(pkgs: list[LocalPackage], root: Path) -> dict[str, set[str]]:
-    """crate -> local packages (under root) that its patched Cargo.toml depends on."""
+    """crate -> local packages (under root) that its build needs."""
     local = local_packages(root)
-    deps: dict[str, set[str]] = {}
-    with tempfile.TemporaryDirectory() as tmp:
-        for p in pkgs:
-            src = extract_patched(p, Path(tmp))
-            toml = tomllib.loads((src / "Cargo.toml").read_text())
-            deps[p.crate] = {d["crate_id"] for d in manifest_deps(toml)
-                             if not is_foreign(d["target"]) and d["crate_id"] in local and d["crate_id"] != p.crate}
-    return deps
+    return {p.crate: build_deps(p) & set(local) for p in pkgs}
 
 
 def build_stages(pkgs: list[LocalPackage], root: Path, warn_outside: bool = True) -> list[list[LocalPackage]]:
@@ -1432,7 +1435,10 @@ def build_stages(pkgs: list[LocalPackage], root: Path, warn_outside: bool = True
     while len(done) < len(pkgs):
         stage = [p for p in pkgs if p.crate not in done and deps[p.crate] <= done]
         if not stage:
-            die("dependency cycle between: " + ", ".join(sorted(names - done)))
+            left = sorted(names - done)
+            die("dependency cycle between: " + ", ".join(left) + ". Their BuildRequires need each other; "
+                "usually through a dev-dependency: turn off the tests that need it ([tests] in "
+                "rust2rpm.toml) or drop that dev-dependency, then regen")
         stages.append(stage)
         done |= {p.crate for p in stage}
     return stages
@@ -2097,8 +2103,8 @@ def local_closure(pkg: LocalPackage, chroot: str, local: dict[str, LocalPackage]
         if p.crate in seen:
             return
         seen.add(p.crate)
-        for d in sorted(dep_kinds(p)):
-            if d in local and d != p.crate and local[d].version and local[d].builds_in(chroot):
+        for d in sorted(build_deps(p)):
+            if d in local and local[d].version and local[d].builds_in(chroot):
                 visit(local[d])
         order.append(p.crate)
     visit(pkg)
