@@ -1017,6 +1017,10 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
     else:
         env["EDITOR"] = "false"
         mode = ["-r"]  # re-apply a hand-made <crate>-fix-metadata.diff if there is one
+        cfg = tomllib.loads(pkg.config_file.read_text())
+        if manual.exists() and not cfg.get("package", {}).get("cargo-toml-patch-comments"):
+            action(f"{pkg.crate}: {manual.name} is applied, but {EDITS_FILE} is empty and rust2rpm.toml has "
+                   "no cargo-toml-patch-comments; if it is left from earlier edits, delete it and regen")
     cmd = ["rust2rpm", *mode, "-s", "--no-existence-check", *target]
     info(f"   rust2rpm {' '.join(cmd[1:])}")
     res = run(cmd, cwd=pkg.dir, env=env, capture_output=True)
