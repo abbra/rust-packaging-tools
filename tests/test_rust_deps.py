@@ -79,6 +79,47 @@ def test_chroot_metalinks_unknown():
         rd.chroot_metalinks("opensuse-tumbleweed-x86_64")
 
 
+
+# ─── status columns ─────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("target, chroot", [
+    ("fedora-44", "fedora-44-x86_64"),
+    ("fedora-rawhide", "fedora-rawhide-x86_64"),
+    ("rhel+epel-10", "rhel+epel-10-x86_64"),
+    ("epel-10", "epel-10-x86_64"),
+    ("fedora-45-aarch64", "fedora-45-aarch64"),
+])
+def test_release_chroot(target, chroot):
+    assert rd.release_chroot(target) == chroot
+
+
+def test_release_chroot_epel_flavours():
+    # COPR's rhel+epel-N uses EPEL for the current RHEL minor; plain epel-N is EPEL itself
+    assert rd.chroot_metalinks(rd.release_chroot("rhel+epel-10")) == ["epel-z-10"]
+    assert rd.chroot_metalinks(rd.release_chroot("epel-10")) == ["epel-10"]
+
+
+@pytest.mark.parametrize("versions, local, all_versions, cell", [
+    ([], "1.0.0", False, "-"),
+    (["1.0.21"], "1.0.23", False, "1.0.21"),
+    (["0.16.1", "0.17.1"], "0.17.1", False, "0.17.1= (+1)"),
+    (["0.16.1", "0.17.1"], "0.16.1", False, "0.17.1 (+1)"),
+    (["0.16.1", "0.17.1"], "0.16.1", True, "0.16.1=,0.17.1"),
+])
+def test_version_cell(versions, local, all_versions, cell):
+    assert rd.version_cell(versions, local, all_versions) == cell
+
+
+def test_host_release(tmp_path, monkeypatch):
+    osr = tmp_path / "os-release"
+    osr.write_text('NAME="Fedora Linux"\nID=fedora\nVERSION_ID=45\n')
+    monkeypatch.delenv("RUST_DEPS_DNF_ARGS", raising=False)
+    assert rd.host_release(osr) == "fedora-45"
+    monkeypatch.setenv("RUST_DEPS_DNF_ARGS", "--releasever=rawhide")
+    assert rd.host_release(osr) == "fedora-45 (--releasever=rawhide)"
+    assert rd.host_release(tmp_path / "missing") == "host (--releasever=rawhide)"
+
+
 # ─── Cargo.toml edits ───────────────────────────────────────────────────────
 
 CARGO_TOML = """\
