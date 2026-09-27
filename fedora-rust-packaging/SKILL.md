@@ -4,7 +4,7 @@ description: Package Rust crates for Fedora with rust2rpm, including every depen
 compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
 argument-hint: "<crate>[@ver]… | --manifest <Cargo.toml> | <rust-deps command> [args] [--root <dir>]"
 metadata:
-  version: "1.15"
+  version: "1.16"
 ---
 
 # Fedora Rust crate packaging
@@ -93,8 +93,8 @@ Read them as follows (forms can be combined with `--root <dir>`):
 - **Public actions need the user's explicit approval each time:** creating a
   COPR project, submitting COPR builds (`copr` without `-n`, including
   `--retry-failed`), changing COPR chroot settings, deleting COPR packages or
-  builds, Koji scratch builds, and
-  anything in
+  builds, Koji scratch builds, dist-git forks,
+  lookaside uploads and pushes (`dist-git --push`), and anything in
   Bugzilla (`review-request --file`, which files tickets or posts comments
   under the user's name). Show the plan or the drafts first; never pass
   `--file` on your own.
@@ -216,6 +216,13 @@ Read them as follows (forms can be combined with `--root <dir>`):
      `trial`), `--mark-only` for a package kept only for older targets whose
      local packaging is tuned for them (see "Packages that are in Fedora" in
      the manual). Run `adopt -n` first and show the user what it would take.
+   - Updates of adopted packages: `$T dist-git <crate> --dir <dir>` commits
+     the update in a local dist-git checkout. Ask the user where the
+     checkouts live (or use `$RUST_DEPS_DIST_GIT`). Show the commit
+     (`git -C <checkout> show --stat`). Only with approval run it again with
+     `--push`: it forks the repository, uploads the sources to the lookaside
+     cache and pushes under the user's account. Give the user the URL it
+     prints to open the pull request.
    - Start with `$T review-plan --all --project <p>` (read-only) and show the
      user the plan: the order of submission, which drafts are ready (with
      their paths), what is missing for the others, which packages are

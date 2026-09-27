@@ -94,6 +94,7 @@ rust-deps copr --retry-failed --all --project username/repo   # resubmit what ca
 rust-deps resolve -r rhel+epel-10-x86_64 jsonschema     # check against another target
 rust-deps tmt --all --project username/repo -r fedora-45-x86_64   # the generated Fedora CI tests
 rust-deps review-plan --all --project username/repo   # what to submit, in which order, which drafts are ready
+rust-deps dist-git --dir ~/src/fedora zmij   # an update of a Fedora package, committed in its dist-git checkout
 rust-deps review-request --all --project username/repo --fas username   # drafts; --file files them
 rust-deps review-status --all                   # reviewer comments, next steps
 rust-deps status --project username/repo        # packaged vs. crates.io vs. each Fedora/EPEL release
