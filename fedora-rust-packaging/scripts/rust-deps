@@ -48,6 +48,7 @@ ROOT_ENV = "RUST_DEPS_ROOT"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "rust-packaging-tools"
 USER_AGENT = "rust-packaging-tools (Fedora packaging helper; https://src.fedoraproject.org)"
 EDITS_FILE = "cargo-toml-edits.toml"
+TARGETS_FILE = "targets.toml"  # only = ["fedora-44", ...]: build only for these targets
 EDITOR_ENV = "RUST_DEPS_EDITS"
 
 # Targets that never apply to Fedora builds.  Anything guarded by not(...) is
@@ -312,6 +313,17 @@ class LocalPackage:
     @property
     def config_file(self) -> Path:
         return self.dir / "rust2rpm.toml"
+
+    @property
+    def targets(self) -> list[str] | None:
+        """Target releases (e.g. "fedora-44", "rhel+epel-10") this package is
+        limited to, from targets.toml; None means every chroot."""
+        f = self.dir / TARGETS_FILE
+        return tomllib.loads(f.read_text()).get("only") if f.exists() else None
+
+    def builds_in(self, chroot: str) -> bool:
+        t = self.targets
+        return t is None or chroot in t or chroot_release(chroot) in t
 
 
 def local_packages(root: Path) -> dict[str, LocalPackage]:
@@ -913,8 +925,22 @@ def write_config(path: Path, crate: str, edits: dict, lic_names: list[str], lic_
     path.write_text("\n".join(out).rstrip("\n") + "\n")
 
 
+def add_target(pkg_dir: Path, chroot: str) -> None:
+    f = pkg_dir / TARGETS_FILE
+    only = tomllib.loads(f.read_text()).get("only", []) if f.exists() else []
+    rel = chroot_release(chroot)
+    if rel in only:
+        return
+    only.append(rel)
+    f.write_text("# Fedora ships this crate; the package is only for the targets that lack it.\n"
+                 "# 'copr' builds it only in their chroots.\n"
+                 f"only = [{', '.join(json.dumps(t) for t in only)}]\n")
+    info(f"   {pkg_dir.name}: built only for {', '.join(only)} (host Fedora has it; see {TARGETS_FILE})")
+
+
 def cmd_init(args) -> None:
     fedora = fedora_index(args.refresh, args.target)
+    host = fedora_index(args.refresh) if args.target else None
     root: Path = args.root
     queue = []
     for spec in args.crates:
@@ -931,6 +957,8 @@ def cmd_init(args) -> None:
         d = root / name
         if (d / "rust2rpm.toml").exists() and not args.force:
             info(f"== {name}: already initialized in {d} (use --force to redo)")
+            if host and (d / TARGETS_FILE).exists():
+                add_target(d, args.target)  # needed by one more target
             continue
         v = pick_version(name, req)
         if v is None:
@@ -948,6 +976,8 @@ def cmd_init(args) -> None:
         write_config(d / "rust2rpm.toml", name, edits, lic_names, lic_urls)
         for n in notes:
             action(f"{name}: {n}")
+        if host and host.best(name, f"={version}"):
+            add_target(d, args.target)
         pkg = LocalPackage(name, d, None)
         if regen(pkg, version):
             created.append(pkg)
@@ -1410,6 +1440,29 @@ def copr_submit(plan: list[list[tuple[LocalPackage, list[str]]]], project: str, 
     return ids
 
 
+def limit_to_targets(plan: list[list[tuple[LocalPackage, list[str]]]],
+                     project: str) -> list[list[tuple[LocalPackage, list[str]]]]:
+    """Drop the chroots a package is not built for (targets.toml)."""
+    if not any(p.targets is not None for s in plan for p, _ in s):
+        return plan
+    owner, _, name = project.partition("/")
+    all_chroots = sorted(copr_api("project/", ownername=owner, projectname=name)["chroot_repos"])
+    out = []
+    for s in plan:
+        stage = []
+        for p, chroots in s:
+            if p.targets is None:
+                stage.append((p, chroots))
+                continue
+            keep = [c for c in (chroots or all_chroots) if p.builds_in(c)]
+            if keep:
+                stage.append((p, keep))
+            else:
+                info(f"   {p.crate}: not built in these chroots (only for {', '.join(p.targets)})")
+        out.append(stage)
+    return out
+
+
 def cmd_copr(args) -> None:
     stages = build_stages(select(args.root, args.crates, args.all), args.root,
                           warn_outside=not args.retry_failed)  # a retry needs only the failed ones
@@ -1420,6 +1473,7 @@ def cmd_copr(args) -> None:
             return
     else:
         plan = [[(p, args.chroot) for p in s] for s in stages]
+    plan = limit_to_targets(plan, args.project)
     ids = copr_submit(plan, args.project, args.dry_run)
     if args.wait and not args.dry_run:
         info("waiting for the builds to finish")
@@ -1578,7 +1632,7 @@ class CoprState:
         # the chroots that failed, so older builds hold the others' results
         for build in builds:
             for bc in copr_api("build-chroot/list/", build_id=build["id"])["items"]:
-                if bc["name"] not in diag.chroots:
+                if bc["name"] not in diag.chroots and pkg.builds_in(bc["name"]):
                     diag.chroots[bc["name"]] = self.diagnose_chroot(pkg, build, bc)
                     diag.chroots[bc["name"]].build = build["id"]
         if not builds:  # never built: its local dependencies may need a build too
@@ -1633,6 +1687,8 @@ class CoprState:
             req.tests_only = True
             label += " (dev-dependency: only the tests need it)"
         dep = self.local.get(req.crate)
+        if dep and not dep.builds_in(chroot):
+            dep = None  # the target's own package is meant to serve it
         if dep and dep.version and req_matches(req.req, dep.version):
             dd = self.diagnose(dep)
             if not dd.build:
@@ -2060,8 +2116,11 @@ def cmd_review_request(args) -> None:
     if not fas:
         die("give your Fedora account name with --fas (or RUST_DEPS_FAS)")
     pkgs = [p for s in build_stages(select(args.root, args.crates, args.all), args.root) for p in s]
+    for p in (p for p in pkgs if p.targets is not None):
+        info(f"== {p.crate}: skipped; Fedora ships it, the package is only for {', '.join(p.targets)}")
+    pkgs = [p for p in pkgs if p.targets is None]
     local = local_packages(args.root)
-    deps = local_deps(pkgs, args.root)
+    deps = {c: {d for d in ds if local[d].targets is None} for c, ds in local_deps(pkgs, args.root).items()}
     bz = bugzilla_client() if args.file else None
     koji_tasks = {}
     for item in args.koji_task:

@@ -158,9 +158,14 @@ Read them as follows (forms can be combined with `--root <dir>`):
      - `BLOCKED` by a crate a target lacks: report per target the missing
        crates, what the target has, and which packages need them (tests only
        or not). Let the user choose: package them for that target
-       (`resolve -r <chroot>`, `init --recursive -r <chroot>`, built only in
-       the chroots that lack them), or leave the target out for those packages.
-       Never drop a required dependency to make a target build.
+       (`resolve -r <chroot>`, `init --recursive -r <chroot>`; `init` writes
+       `targets.toml` so `copr` builds a crate Fedora already ships only in the
+       chroots that lack it), or leave the target out for those packages. For
+       an UPDATE on the target, ask: plain newer package or compat package.
+       Never drop a required dependency to make a target build. `init` drops
+       optional features whose crates the target lacks; if a consumer needs
+       such a feature (e.g. `strum/derive`), package that crate as well and
+       remove the drop.
      - `FAILED`: read the cached log it names, reproduce with `mock-chain -r
        <chroot>`, fix, and resubmit with `copr -r <chroot>`.
      - Repeat `copr-status` until the chroots the user needs are all `ok`.
