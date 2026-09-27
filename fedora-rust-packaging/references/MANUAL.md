@@ -179,6 +179,7 @@ num-bigint = "0.4"
 
 [add-dev-dependencies] # restore dev-deps stripped before publishing
 proptest = "1.5"
+rand = { version = "0.8", features = ["small_rng"] }   # when a test needs features
 ```
 
 Dropping a dependency or feature also removes every reference to it from
