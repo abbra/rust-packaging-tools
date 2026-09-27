@@ -1737,6 +1737,24 @@ def copr_api(path: str, **params) -> dict:
     return json.loads(_get(f"{COPR_URL}/api_3/{path}?{urllib.parse.urlencode(params)}"))
 
 
+def spec_runs_check(spec: Path) -> bool:
+    """Whether the spec's %check section runs (as the dev-dependencies then are BuildRequires).
+
+    rpmspec expands the spec, so every form counts: %bcond check 0|1, the older
+    %bcond_with check (off by default) and %bcond_without check (on), and
+    expressions (evaluated on this host).  Without rpmspec, read the literal forms.
+    """
+    res = run(["rpmspec", "-P", str(spec)], capture_output=True)
+    if res.returncode == 0:
+        return bool(re.search(r"^%check\b", res.stdout, re.M))
+    text = spec.read_text()
+    if m := re.search(r"^%bcond\s+check\s+(\d+)\s*$", text, re.M):
+        return m.group(1) != "0"
+    if re.search(r"^%bcond_with\s+check\b", text, re.M):
+        return False
+    return bool(re.search(r"^%check\b", text, re.M))
+
+
 _BUILD_INFO: dict[tuple[str, str | None], tuple[dict, list[str]]] = {}
 
 
@@ -1751,8 +1769,7 @@ def build_info(pkg: LocalPackage) -> tuple[dict, list[str]]:
         spec = pkg.spec.read_text()
         m = re.search(r"^%cargo_generate_buildrequires(.*)$", spec, re.M)
         flags = (m.group(1) if m else "").split()
-        check = re.search(r"^%bcond\s+check\s+(\d)", spec, re.M)
-        with_check = "-t" in flags or not check or check.group(1) == "1"
+        with_check = "-t" in flags or spec_runs_check(pkg.spec)
         args, it = [], iter(flags)
         for f in it:
             if f == "-a":
