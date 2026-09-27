@@ -51,6 +51,7 @@ CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ru
 USER_AGENT = "rust-packaging-tools (Fedora packaging helper; https://src.fedoraproject.org)"
 EDITS_FILE = "cargo-toml-edits.toml"
 TARGETS_FILE = "targets.toml"  # only = ["fedora-44", ...]: build only for these targets
+DIST_GIT_FILE = "dist-git.toml"  # adopted from Fedora's dist-git: package, branch, commit, version
 EDITOR_ENV = "RUST_DEPS_EDITS"
 
 # Targets that never apply to Fedora builds.  Anything guarded by not(...) is
@@ -334,7 +335,28 @@ class LocalPackage:
         f = self.dir / TARGETS_FILE
         return tomllib.loads(f.read_text()).get("only") if f.exists() else None
 
+    @property
+    def dist_git(self) -> dict | None:
+        """Where the packaging was adopted from (dist-git.toml), for a package that is in Fedora."""
+        f = self.dir / DIST_GIT_FILE
+        return tomllib.loads(f.read_text()) if f.exists() else None
+
+    @property
+    def limited(self) -> bool:
+        """Not built everywhere, and not for a Fedora review: targets.toml, or adopted from dist-git."""
+        return self.targets is not None or self.dist_git is not None
+
+    @property
+    def scope(self) -> str:
+        if self.dist_git is not None:
+            return f"in Fedora; built where a target lacks {self.version} ({DIST_GIT_FILE})"
+        if self.targets is not None:
+            return f"only for {', '.join(self.targets)} ({TARGETS_FILE})"
+        return "everywhere"
+
     def builds_in(self, chroot: str) -> bool:
+        if self.dist_git is not None:  # where the target does not have this version (yet)
+            return self.version not in target_index(chroot).versions(self.crate)
         t = self.targets
         return t is None or chroot in t or chroot_release(chroot) in t
 
@@ -1859,8 +1881,8 @@ def copr_submit(plan: list[list[tuple[LocalPackage, list[str]]]], project: str, 
 
 def limit_to_targets(plan: list[list[tuple[LocalPackage, list[str]]]],
                      project: str) -> list[list[tuple[LocalPackage, list[str]]]]:
-    """Drop the chroots a package is not built for (targets.toml)."""
-    if not any(p.targets is not None for s in plan for p, _ in s):
+    """Drop the chroots a package is not built for (targets.toml, or adopted: where a target has it)."""
+    if not any(p.limited for s in plan for p, _ in s):
         return plan
     owner, _, name = project.partition("/")
     all_chroots = sorted(copr_api("project/", ownername=owner, projectname=name)["chroot_repos"])
@@ -1868,14 +1890,14 @@ def limit_to_targets(plan: list[list[tuple[LocalPackage, list[str]]]],
     for s in plan:
         stage = []
         for p, chroots in s:
-            if p.targets is None:
+            if not p.limited:
                 stage.append((p, chroots))
                 continue
             keep = [c for c in (chroots or all_chroots) if p.builds_in(c)]
             if keep:
                 stage.append((p, keep))
             else:
-                info(f"   {p.crate}: not built in these chroots (only for {', '.join(p.targets)})")
+                info(f"   {p.crate}: not built in these chroots ({p.scope})")
         out.append(stage)
     return out
 
@@ -2516,7 +2538,7 @@ def check_target(pkg: LocalPackage, chroot: str, local: dict[str, LocalPackage],
         if version:
             continue
         if dep and not dep.builds_in(chroot):
-            why += f"; the local package is only for {', '.join(dep.targets)}"
+            why += f"; the local package is {dep.scope}"
         elif dep:
             why += f"; the local package is {dep.version or 'not generated'}"
         problems.append(TargetProblem(req, why, True))
@@ -2999,11 +3021,11 @@ def cmd_review_request(args) -> None:
     if not fas:
         die("give your Fedora account name with --fas (or RUST_DEPS_FAS)")
     pkgs = [p for s in build_stages(select(args.root, args.crates, args.all), args.root) for p in s]
-    for p in (p for p in pkgs if p.targets is not None):
-        info(f"== {p.crate}: skipped; Fedora ships it, the package is only for {', '.join(p.targets)}")
-    pkgs = [p for p in pkgs if p.targets is None]
+    for p in (p for p in pkgs if p.limited):
+        info(f"== {p.crate}: skipped; no review: {p.scope}")
+    pkgs = [p for p in pkgs if not p.limited]
     local = local_packages(args.root)
-    deps = {c: {d for d in ds if local[d].targets is None} for c, ds in local_deps(pkgs, args.root).items()}
+    deps = {c: {d for d in ds if not local[d].limited} for c, ds in local_deps(pkgs, args.root).items()}
     bz = bugzilla_client() if args.file else None
     koji_tasks = {}
     for item in args.koji_task:
@@ -3099,13 +3121,21 @@ def review_plan(pkgs: list[LocalPackage], root: Path, project: str | None, chroo
     for stage in stages:
         items = []
         for pkg in stage:
-            if pkg.targets is not None:
+            have = ", ".join(rawhide.versions(pkg.crate)) or "no build yet"
+            if (dg := pkg.dist_git) is not None:
+                source = f"adopted from dist-git {dg.get('branch')} {str(dg.get('commit', ''))[:10]}"
+                if pkg.version in rawhide.versions(pkg.crate):
+                    item = PlanItem(pkg, "skip", "", f"in Fedora ({source}); nothing to submit", [])
+                else:
+                    item = PlanItem(pkg, "update", "", f"in Fedora (Rawhide: {have}; {source}): a pull request "
+                                    f"to its dist-git with {pkg.version}", [])
+            elif pkg.targets is not None:
                 item = PlanItem(pkg, "skip", "", f"built only for {', '.join(pkg.targets)} (targets.toml); "
                                 "Rawhide has the crate, so there is nothing to review", [])
             elif dist_git_has(pkg.rpm_name):
-                have = ", ".join(rawhide.versions(pkg.crate)) or "no build yet"
-                item = PlanItem(pkg, "update", "", f"Fedora has {pkg.rpm_name} (Rawhide: {have}): update its "
-                                "dist-git repository (a pull request) instead of a review", [])
+                item = PlanItem(pkg, "update", "", f"Fedora has {pkg.rpm_name} (Rawhide: {have}): adopt its "
+                                f"packaging ('adopt {pkg.crate}'), then a pull request to its dist-git "
+                                "instead of a review", [])
             else:
                 item = PlanItem(pkg, "review", "", "", [])
                 bug = request_state(pkg).get("bug")
@@ -3179,6 +3209,98 @@ def cmd_review_plan(args) -> None:
     if counts["ready"]:
         info(f"file the READY ones, in this order: rust-deps review-request --project {args.project or 'P'} "
              "--fas NAME --file " + " ".join(i.pkg.crate for i in items if i.state == "ready"))
+
+
+# ─── adopt (Fedora's dist-git packaging) ─────────────────────────────────────
+
+DIST_GIT = "https://src.fedoraproject.org"
+# dist-git files that are not packaging input: the spec is generated here, the rest is git and lookaside data
+DIST_GIT_SKIP = {".gitignore", "sources", "changelog", "README.md", "gating.yaml"}
+
+
+def dist_git_files(tree: list[dict], rpm_name: str) -> list[str]:
+    """The dist-git files to take over: the regular files, except the spec and git/lookaside data."""
+    return sorted(e["name"] for e in tree
+                  if e.get("type") == "file" and e["name"] not in DIST_GIT_SKIP and e["name"] != f"{rpm_name}.spec")
+
+
+def spec_similarity(ours: str, theirs: str) -> tuple[int, int]:
+    """(lines that differ, lines compared) between two specs, ignoring the header comment and %changelog."""
+    def norm(text: str) -> list[str]:
+        text = text.split("\n%changelog", 1)[0]
+        return [ln.rstrip() for ln in text.splitlines() if ln.strip() and not ln.startswith("# Generated by rust2rpm")]
+    a, b = norm(ours), norm(theirs)
+    import difflib
+    changed = sum(1 for ln in difflib.unified_diff(a, b, lineterm="", n=0)
+                  if ln[:1] in "+-" and not ln.startswith(("+++", "---")))
+    return changed, max(len(a), len(b))
+
+
+def adopt(pkg: LocalPackage, branch: str, dry_run: bool, mark_only: bool = False) -> bool:
+    name = pkg.rpm_name
+    try:
+        commit = json.loads(_get(f"{DIST_GIT}/api/0/rpms/{name}/git/branches?with_commits=true"))["branches"][branch]
+        tree = json.loads(_get(f"{DIST_GIT}/api/0/rpms/{name}/tree/{commit}"))["content"]
+        spec = _get(f"{DIST_GIT}/rpms/{name}/raw/{commit}/f/{name}.spec").decode()
+    except (urllib.error.URLError, KeyError) as exc:
+        action(f"{pkg.crate}: cannot read {name} {branch} from dist-git: {exc}")
+        return False
+    files = dist_git_files(tree, name)
+    fedora_version = (re.search(r"^Version:\s+(\S+)", spec, re.M) or [None, None])[1]
+    marker = ("# Adopted from Fedora's dist-git: the package is in Fedora.  rust-deps builds it in COPR only\n"
+              "# where a target lacks this version, and files no review request for it.\n"
+              f'package = "{name}"\nbranch = "{branch}"\ncommit = "{commit}"\nversion = "{fedora_version}"\n')
+    if mark_only or "rust2rpm.toml" not in files:
+        # keep the local packaging (e.g. tuned for older targets), or there is none to take over (a spec
+        # edited by hand, without rust2rpm.toml); the package is in Fedora either way
+        why = "as asked" if mark_only else "dist-git has no rust2rpm.toml"
+        info(f"== {pkg.crate}: {name} {branch} at {commit[:10]} (Fedora {fedora_version}): keeping the local "
+             f"packaging ({why}), marked as in Fedora")
+        if not dry_run:
+            (pkg.dir / DIST_GIT_FILE).write_text(marker.replace("# Adopted from", "# Marked from", 1)
+                                                 + f'packaging = "local"  # {why}\n')
+            if (pkg.dir / TARGETS_FILE).exists():
+                (pkg.dir / TARGETS_FILE).unlink()
+        return True
+    ours, theirs = parse_version(pkg.version or ""), parse_version(fedora_version or "")
+    version = pkg.version if ours and theirs and ours > theirs else fedora_version
+    info(f"== {pkg.crate}: {name} {branch} at {commit[:10]}: Fedora {fedora_version}, here {pkg.version}; "
+         f"packaging {version}")
+    info(f"   files: {', '.join(files)}")
+    if dry_run:
+        return True
+    backup = pkg.dir / ".rust-deps-backup" / f"adopt-{time.strftime('%Y%m%d-%H%M%S')}"
+    backup.mkdir(parents=True)
+    for f in [pkg.config_file, pkg.edits_file, pkg.dir / TARGETS_FILE, *pkg.dir.glob("*-fix-metadata.diff"),
+              *(pkg.dir / n for n in files)]:
+        if f.exists() and not (backup / f.name).exists():
+            shutil.move(str(f), backup / f.name)
+    for n in files:
+        (pkg.dir / n).write_bytes(_get(f"{DIST_GIT}/rpms/{name}/raw/{commit}/f/{n}"))
+    pkg.edits_file.write_text("# Adopted from Fedora's dist-git: Cargo.toml changes are in the hand-made\n"
+                              f"# {pkg.crate}-fix-metadata.diff, as there.  Edits here would replace it.\n")
+    (pkg.dir / DIST_GIT_FILE).write_text(marker)
+    info(f"   earlier configuration kept in {backup}")
+    if not regen(LocalPackage(pkg.crate, pkg.dir, pkg.version, pkg.name), version):
+        action(f"{pkg.crate}: regen with Fedora's packaging failed at {version}; if its fix-metadata.diff does "
+               "not apply to this version, update it (rust2rpm -p) or express it in cargo-toml-edits.toml")
+        return False
+    new = local_packages(pkg.dir.parent)[pkg.crate]
+    if version == fedora_version:
+        changed, total = spec_similarity(new.spec.read_text(), spec)
+        info(f"   the regenerated spec {'matches' if not changed else f'differs in {changed} of {total} lines from'} "
+             f"Fedora's")
+    return True
+
+
+def cmd_adopt(args) -> None:
+    pkgs = select(args.root, args.crates, args.all)
+    if args.all:
+        pkgs = [p for p in pkgs if p.dist_git is None and not p.compat and dist_git_has(p.rpm_name)]
+        info(f"in Fedora's dist-git: {', '.join(p.rpm_name for p in pkgs) or 'none'}")
+    failed = [p.crate for p in pkgs if not adopt(p, args.branch, args.dry_run, args.mark_only)]
+    if failed:
+        die(f"adopt failed for: {', '.join(failed)}")
 
 
 # ─── review status (Bugzilla, read-only) ─────────────────────────────────────
@@ -3466,6 +3588,11 @@ def cmd_review_status(args) -> None:
         pkgs = [p for s in build_stages(pkgs, args.root) for p in s]  # dependency order
     summary = []
     for pkg in pkgs:
+        if pkg.limited and not request_state(pkg).get("bug"):
+            nxt = f"no review: {pkg.scope}"
+            info(f"== {pkg.rpm_name} {pkg.version}\n   next: {nxt}")
+            summary.append((pkg.rpm_name, "-", nxt))
+            continue
         nxt, bug_id = review_status_one(pkg, request_state(pkg), args.record, args.comments)
         info(f"   next: {nxt}")
         summary.append((pkg.rpm_name, link(bug_url(bug_id), str(bug_id)) if bug_id else "-", nxt))
@@ -3516,7 +3643,7 @@ def cmd_status(args) -> None:
         chroot = release_chroot(t)
         releases.setdefault(chroot_release(chroot), fedora_index(args.refresh, chroot))
     pkgs = select(args.root, args.crates, args.all or not args.crates)
-    show_targets = any(p.targets is not None for p in pkgs)
+    show_targets = any(p.limited for p in pkgs)
     rows = [("crate", "packaged", "crates.io", *releases, *(["for"] if show_targets else []), "patch", "srpm")]
     for pkg in pkgs:
         latest = pick_version(pkg.crate)
@@ -3526,7 +3653,8 @@ def cmd_status(args) -> None:
             pkg.version or "-",
             (latest or {}).get("num", "?") + ("" if latest and latest["num"] == pkg.version else " *"),
             *(version_cell(idx.versions(pkg.crate), pkg.version, args.all_versions) for idx in releases.values()),
-            *([",".join(pkg.targets) if pkg.targets is not None else "all"] if show_targets else []),
+            *([("where missing" if pkg.dist_git is not None else ",".join(pkg.targets))
+               if pkg.limited else "all"] if show_targets else []),
             "yes" if (pkg.dir / f"{pkg.crate}-fix-metadata.diff").exists() else "-",
             "yes" if srpm else "-",
         ))
@@ -3537,7 +3665,8 @@ def cmd_status(args) -> None:
     info("= : the version packaged here; (+N): N older versions as well" + ("" if args.all_versions else
          " (--all-versions lists them)"))
     if show_targets:
-        info("for: the targets a package is built for (targets.toml)")
+        info(f"for: the targets a package is built for ({TARGETS_FILE}); 'where missing': adopted from "
+             f"Fedora ({DIST_GIT_FILE}), built where a target lacks this version")
 
 
 # ─── doctor ──────────────────────────────────────────────────────────────────
@@ -3728,6 +3857,15 @@ def main() -> None:
     sp.add_argument("--file", action="store_true",
                     help="file new requests / post updated URLs in Bugzilla (default: only write drafts)")
     sp.set_defaults(func=cmd_review_request)
+
+    sp = sub.add_parser("adopt", help="take over Fedora's dist-git packaging of packages that are in Fedora")
+    with_sel(sp)
+    sp.add_argument("--branch", default="rawhide", help="dist-git branch (default %(default)s)")
+    sp.add_argument("--mark-only", action="store_true",
+                    help="keep the local packaging (e.g. tuned for older targets); only mark the package as "
+                         "in Fedora: no review request, built where a target lacks this version")
+    sp.add_argument("-n", "--dry-run", action="store_true")
+    sp.set_defaults(func=cmd_adopt)
 
     sp = sub.add_parser("review-plan", help="what to submit for review, in which order, and which drafts are "
                         "ready (read-only)")

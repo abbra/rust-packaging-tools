@@ -4,7 +4,7 @@ description: Package Rust crates for Fedora with rust2rpm, including every depen
 compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
 argument-hint: "<crate>[@ver]… | --manifest <Cargo.toml> | <rust-deps command> [args] [--root <dir>]"
 metadata:
-  version: "1.14"
+  version: "1.15"
 ---
 
 # Fedora Rust crate packaging
@@ -210,6 +210,12 @@ Read them as follows (forms can be combined with `--root <dir>`):
    follow "Submitting to Fedora" in `references/MANUAL.md`.
    - Ask for the FAS account name, the COPR project (`owner/project`), and
      whether the user is in the `packager` group (else `--needs-sponsor`).
+   - Packages that are in Fedora (`review-status`: "done: the package is in
+     Fedora"; `review-plan`: "update") need no review. Offer `adopt`: full
+     adoption for a newer version meant for Fedora (then `check-targets`,
+     `trial`), `--mark-only` for a package kept only for older targets whose
+     local packaging is tuned for them (see "Packages that are in Fedora" in
+     the manual). Run `adopt -n` first and show the user what it would take.
    - Start with `$T review-plan --all --project <p>` (read-only) and show the
      user the plan: the order of submission, which drafts are ready (with
      their paths), what is missing for the others, which packages are
