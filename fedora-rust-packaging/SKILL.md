@@ -4,7 +4,7 @@ description: Package Rust crates for Fedora with rust2rpm, including every depen
 compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
 argument-hint: "<crate>[@ver]… | --manifest <Cargo.toml> | <rust-deps command> [args] [--root <dir>]"
 metadata:
-  version: "1.9"
+  version: "1.10"
 ---
 
 # Fedora Rust crate packaging
@@ -41,6 +41,7 @@ Read them as follows (forms can be combined with `--root <dir>`):
   `Cargo.toml`: package the project's dependencies that Fedora is missing.
 - **a `rust-deps` command** with its arguments (`status`, `resolve …`,
   `trial <crate>`, `srpm --all`, `review --all -r <chroot>`,
+  `copr-status --all --project <owner/project>`,
   `review-status --all`, `review-status --user <login>`, …): run only that
   step and report its result.
 - **`--root <dir>`**: the packages root (see Setup).
@@ -89,8 +90,9 @@ Read them as follows (forms can be combined with `--root <dir>`):
   - a required dependency lacking features in Fedora
   - deleting existing packages
 - **Public actions need the user's explicit approval each time:** creating a
-  COPR project, submitting COPR builds (`copr` without `-n`), Koji scratch
-  builds, and anything in
+  COPR project, submitting COPR builds (`copr` without `-n`, including
+  `--retry-failed`), changing COPR chroot settings, Koji scratch builds, and
+  anything in
   Bugzilla (`review-request --file`, which files tickets or posts comments
   under the user's name). Show the plan or the drafts first; never pass
   `--file` on your own.
@@ -148,6 +150,20 @@ Read them as follows (forms can be combined with `--root <dir>`):
      remaining packages. The local repository keeps what already built.
    - Otherwise print `$T mock-chain --all -n` and the COPR command
      (`$T copr --all --project <p> -r <chroot> -n`) for the user.
+   - **COPR failures** (any chroot, any time the user reports failed COPR
+     builds): run `$T copr-status --all --project <p>` (read-only) and follow
+     "COPR build failures" in `references/MANUAL.md`.
+     - `RETRY` chroots: with approval, run the `copr --retry-failed` command
+       it prints.
+     - `BLOCKED` by a crate a target lacks: report per target the missing
+       crates, what the target has, and which packages need them (tests only
+       or not). Let the user choose: package them for that target
+       (`resolve -r <chroot>`, `init --recursive -r <chroot>`, built only in
+       the chroots that lack them), or leave the target out for those packages.
+       Never drop a required dependency to make a target build.
+     - `FAILED`: read the cached log it names, reproduce with `mock-chain -r
+       <chroot>`, fix, and resubmit with `copr -r <chroot>`.
+     - Repeat `copr-status` until the chroots the user needs are all `ok`.
 7. **Review:** after `mock-chain` succeeded, run `$T review --all -r <same
    chroot>` (in the background; it rebuilds every package in mock). It runs
    `fedora-review` with the local dependencies from the mock-chain results.
@@ -237,5 +253,7 @@ prints these URLs; never report a bare bug or build number.
   answers to the manual review items.
 - **Submission:** COPR builds, and for each package its review request (draft
   path, or ticket URL once filed).
+- **COPR chroots** that are not `ok`, grouped by cause, with what was
+  resubmitted.
 - **Open decisions** the user must make: UPDATE of Fedora packages, default
   features, compat packages.

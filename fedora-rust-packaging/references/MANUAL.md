@@ -90,6 +90,7 @@ $T srpm --all
 $T order --all
 $T mock-chain --all -r fedora-45-x86_64      # local, authoritative test
 $T copr --all --project user/project -r fedora-45-x86_64
+$T copr-status --all --project user/project   # why a chroot failed, what to do
 
 # 7. Package review, after mock-chain built everything.
 $T review --all -r fedora-45-x86_64
@@ -120,7 +121,8 @@ hold:
 | `srpm CRATE…\|--all [--no-prep]` | Run `spectool -g` and `rpmbuild -bs`, then `rpmbuild -bp` (patches apply, license copy works) and `rpmlint`. |
 | `order CRATE…\|--all [--json]` | Print build stages. Each stage depends only on earlier stages and on Fedora. |
 | `mock-chain CRATE…\|--all [-r CHROOT] [-n]` | Run `mock --chain` over the SRPMs in dependency order. |
-| `copr CRATE…\|--all --project P [-r CHROOT]… [-n] [--wait]` | Submit to COPR. The builds of a stage form one COPR batch (`--with-build-id`), which starts after the previous stage's batch has finished (`--after-build-id`). With `--wait`, watch the builds until they finish and fail if any failed. |
+| `copr CRATE…\|--all --project P [-r CHROOT]… [-n] [--wait] [--retry-failed]` | Submit to COPR. The builds of a stage form one COPR batch (`--with-build-id`), which starts after the previous stage's batch has finished (`--after-build-id`). With `--wait`, watch the builds until they finish and fail if any failed. With `--retry-failed`, submit only what `copr-status` marks `RETRY` (limited to the `-r` chroots, if given), plus packages that have no build of their current version yet. See "COPR build failures". |
+| `copr-status CRATE…\|--all --project P [-r CHROOT]… [--json] [--refresh]` | Read-only. For the latest COPR build of each package's current version, show every chroot's result, and for each failure the reason from the build log: each missing BuildRequires, checked against the local packages and their builds and against the target's repositories, or the compile and test errors. Ends with the next steps. Logs are cached in `~/.cache/rust-packaging-tools/copr-logs/`. See "COPR build failures". |
 | `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
 | `review-request CRATE…\|--all --project P --fas NAME [-r CHROOT] [--needs-sponsor] [--comment TEXT] [--koji-task CRATE=TASK]… [--file]` | Prepare the Bugzilla review request of each package, in dependency order, from its latest succeeded COPR build (chroot default `fedora-rawhide-x86_64`). Requires a passing `review` of the current SRPM and a published spec identical to the local one. Writes `review-request.txt`. `--koji-task` adds a link to a successful Koji scratch build of that crate's SRPM (checked through Koji). With `--file`, files it (or, if already filed, posts the new Spec/SRPM URLs) and records the bug in `review-request.json`. See "Submitting to Fedora". |
 | `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
@@ -135,12 +137,13 @@ terminals that do not support OSC 8.
 
 Caches live in `~/.cache/rust-packaging-tools`:
 - crates.io responses
-- the Fedora crate list, refreshed daily or with `--refresh` on `resolve`, `init` and `status`;
-  one list per target release for `-r CHROOT`
+- the Fedora crate list, refreshed daily or with `--refresh` on `resolve`, `init`, `status`
+  and `copr-status`; one list per target release for `-r CHROOT`
 - the cargo target directory used by trials, and trial logs
+- COPR build logs (`copr-logs/<build>-<chroot>.log`)
 
 To query another release than the running system, pass `-r CHROOT` (see
-"Other targets" for how targets map to repositories), or set
+"COPR build failures" for how targets map to repositories), or set
 `RUST_DEPS_DNF_ARGS="--releasever=rawhide"`.
 
 ## `cargo-toml-edits.toml`
@@ -263,6 +266,7 @@ Steps:
 1. `review` passes for every package (`[!]`-free) and `srpm` is current.
 2. `copr --all --project <owner/project> -r fedora-rawhide-x86_64 --wait`.
    The stages are chained, so each package builds against the ones it needs.
+   If a build fails, `copr-status` shows why (see "COPR build failures").
 3. `review-request --all --project <owner/project> --fas <account>` writes
    `<crate>/review-request.txt` for each package. It contains the ticket
    summary (`Review Request: rust-<crate> - <Summary>`) and the first comment:
@@ -336,11 +340,68 @@ branches, build there and create Bodhi updates. Close the review ticket with
 resolution `NEXTRELEASE` once the package is built (or let Bodhi close it), and
 add the package to release monitoring.
 
-## Other targets
+## COPR build failures
 
-`resolve`, `init` and `status` check the host's Fedora release. With
-`-r CHROOT` they check a COPR or mock target instead, e.g. an older Fedora
-release or EPEL, which have their own crate versions.
+`resolve` checks the host's Fedora release only. A COPR project usually builds
+for more targets (older Fedora releases, Rawhide, EPEL), and each has its own
+crate versions, so a package that builds in `mock-chain` can still fail in
+some chroots. After the builds have finished:
+
+```
+$T copr-status --all --project user/project          # all chroots
+$T copr-status --all --project user/project -r rhel+epel-10-x86_64
+```
+
+For every package it takes the newest COPR build of the local version, and
+for every chroot prints one of:
+
+| verdict | meaning | what to do |
+|---|---|---|
+| `ok` | succeeded (or skipped by ExclusiveArch) | nothing |
+| `BUILDING` / `WAIT` | still running, or waiting for a local dependency that still builds there | run `copr-status` again later |
+| `RETRY` | failed, but the cause is gone: the local dependency it lacked is built there now, or can be resubmitted before it; the target now has the crate; or the build was canceled | `copr --retry-failed` |
+| `BLOCKED` | a BuildRequires is missing and will stay missing: the target lacks the crate (or the needed version or features) and the tree has no package for it, or a local dependency failed there for such a reason | decide, see below |
+| `FAILED` | a compile or test error (the matching log lines are shown) | fix the package |
+
+A missing crate is marked "dev-dependency: only the tests need it" when only
+the package's `[dev-dependencies]` require it.
+
+Then:
+
+1. **`RETRY`:** run the command printed at the end, e.g.
+   `$T copr --retry-failed --project user/project jsonschema-value jsonschema`.
+   It resubmits only the `RETRY` chroots of each package, stage by stage, so a
+   dependency is rebuilt before the packages that need it. It names the
+   chroots it leaves out and why. Resubmitting builds is a public action; ask
+   first.
+2. **`BLOCKED` by a crate the target lacks.** The summary lists, per target,
+   each missing crate, what the target has and which packages need it. The
+   choice is the user's, per target:
+   - **Package the crate for that target.** Check what it needs there with
+     `$T resolve -r <chroot> <crate>@<req>` and create the packages with
+     `$T init --recursive -r <chroot> <crate>@<req>`. Such a package may exist
+     in Fedora already (only the older target lacks it): build it only in the
+     chroots that need it, `$T copr --project P -r <chroot>… <crate>`, and do
+     not file a Fedora review request for it. If the target has an older
+     version, this is a compat package or an update of the target's package
+     (EPEL maintainers decide those), so ask.
+   - **Leave the target out** for the package and the packages that need it:
+     submit them with `-r` naming only the other chroots.
+   - **Only the tests need it:** building the chroot without `%check`
+     (`copr-cli edit-chroot --rpmbuild-without check <project>/<chroot>`) makes
+     the dev-dependencies unnecessary, but it applies to every package in that
+     chroot of the project, and a review request must still show a build with
+     tests.
+3. **`BLOCKED` by a local dependency** that failed there: handle that
+   dependency first; `copr-status` shows its own reason.
+4. **`FAILED`:** read the log it names (the full log is cached locally), and
+   reproduce it with `$T mock-chain -r <chroot> <crate>…`. Mock ships configs
+   for most COPR chroots (`fedora-44-x86_64`, `rhel+epel-10-x86_64`; RHEL
+   needs a subscription, `centos-stream+epel-10-x86_64` is close). Fix,
+   `regen`, `srpm`, then submit the package and the packages that need it with
+   `copr -r <chroot>…`.
+
+Run `copr-status` again after each round until every chroot you need is `ok`.
 
 Targets and the repositories `-r CHROOT` queries (the ones that ship crates;
 RHEL and CentOS ship none):
@@ -433,7 +494,10 @@ from `cargo-toml-edits.toml` and the matching comments from `rust2rpm.toml`.
   catches missing dev-dependencies, missing test data, tests that need the
   network and failing tests. Only
   `mock-chain` (or COPR) proves the package builds against Fedora's crate
-  versions.
+  versions, and only in the chroots it built.
+- `copr-status` recognizes missing BuildRequires in dnf's and dnf5's output
+  and the usual rustc and test failure lines. For other failures it points to
+  the log.
 - `resolve` recognizes platform-specific dependencies (wasm, windows, macos, …)
   with a heuristic and ignores them, as rust2rpm's automatic patch does.
   Dependencies renamed in `Cargo.toml` (`package = "…"`) are matched by
