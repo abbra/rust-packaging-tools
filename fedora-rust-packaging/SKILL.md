@@ -201,6 +201,11 @@ Read them as follows (forms can be combined with `--root <dir>`):
      are specific to the package (license findings, bundled code, disabled
      tests, license workarounds).
    - Without mock, say that the review was not run.
+   - **tmt tests:** `regen` generates them (`.fmf/`, `plans/`, `tests/rust-deps/`
+     in the package directory). After the COPR builds succeeded, if `tmt` is
+     installed, run `$T tmt --all --project <p> -r fedora-<N>-x86_64` (in the
+     background) and fix what fails like a build failure. Otherwise say they
+     were not run. On import to dist-git they must be committed too.
 8. **Submit to Fedora** (only when the user wants the packages in Fedora):
    follow "Submitting to Fedora" in `references/MANUAL.md`.
    - Ask for the FAS account name, the COPR project (`owner/project`), and

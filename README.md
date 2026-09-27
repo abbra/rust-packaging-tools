@@ -92,6 +92,7 @@ rust-deps copr-status --all --project username/repo   # why builds failed, per c
 rust-deps copr-log jsonschema -r fedora-44-x86_64 --project username/repo   # errors, explained warnings
 rust-deps copr --retry-failed --all --project username/repo   # resubmit what can succeed now
 rust-deps resolve -r rhel+epel-10-x86_64 jsonschema     # check against another target
+rust-deps tmt --all --project username/repo -r fedora-45-x86_64   # the generated Fedora CI tests
 rust-deps review-request --all --project username/repo --fas username   # drafts; --file files them
 rust-deps review-status --all                   # reviewer comments, next steps
 rust-deps review-status --user username              # all your review tickets, tracked in ~/.cache
