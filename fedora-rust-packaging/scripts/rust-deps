@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import collections
 import functools
+import gzip
 import json
 import os
 import re
@@ -1323,13 +1324,13 @@ def local_deps(pkgs: list[LocalPackage], root: Path) -> dict[str, set[str]]:
     return deps
 
 
-def build_stages(pkgs: list[LocalPackage], root: Path) -> list[list[LocalPackage]]:
+def build_stages(pkgs: list[LocalPackage], root: Path, warn_outside: bool = True) -> list[list[LocalPackage]]:
     """Group packages into stages; each stage only needs earlier stages (and Fedora)."""
     names = {p.crate for p in pkgs}
     deps = local_deps(pkgs, root)
     for c, ds in deps.items():
         outside = ds - names
-        if outside:
+        if outside and warn_outside:
             warn(f"{c} also needs local packages not in this build: {', '.join(sorted(outside))}")
         deps[c] = ds & names
     stages, done = [], set()
@@ -1408,13 +1409,386 @@ def copr_submit(plan: list[list[tuple[LocalPackage, list[str]]]], project: str, 
 
 
 def cmd_copr(args) -> None:
-    stages = build_stages(select(args.root, args.crates, args.all), args.root)
-    plan = [[(p, args.chroot) for p in s] for s in stages]
+    stages = build_stages(select(args.root, args.crates, args.all), args.root,
+                          warn_outside=not args.retry_failed)  # a retry needs only the failed ones
+    if args.retry_failed:
+        plan = copr_retry_plan(stages, args.root, args.project, args.chroot)
+        if not any(plan):
+            info("nothing to resubmit")
+            return
+    else:
+        plan = [[(p, args.chroot) for p in s] for s in stages]
     ids = copr_submit(plan, args.project, args.dry_run)
     if args.wait and not args.dry_run:
         info("waiting for the builds to finish")
         if run(["copr-cli", "watch-build", *ids]).returncode:
-            die("COPR builds failed; see the build pages")
+            die("COPR builds failed; run 'copr-status' to see why")
+
+
+# ─── COPR build diagnosis ────────────────────────────────────────────────────
+
+COPR_OK = {"succeeded", "forked", "skipped"}  # skipped: ExclusiveArch/ExcludeArch
+COPR_ACTIVE = {"importing", "pending", "starting", "running", "waiting"}
+
+# dnf5: "Problem: nothing provides requested (crate(x/default) >= 1.0.0 with crate(x/default) < 2.0.0~)"
+# dnf4: " Problem 1: nothing provides requested (...)", "No matching package to install: 'x'"
+MISSING_RE = re.compile(r"nothing provides (?:requested )?(.+?)(?: needed by \S+.*)?\s*$"
+                        r"|No match(?:ing package)? (?:for argument|to install):? '?(.+?)'?\s*$")
+CRATE_REQ_RE = re.compile(r"crate\(([^/)\s]+)(?:/([^)\s]+))?\)(?:\s*(>=|=|>)\s*([^\s)]+))?"
+                          r"(?:\s+with\s+crate\([^)]*\)\s*<\s*([^\s)]+))?")
+BUILD_ERROR_RE = re.compile(r"^(error(\[E\d+\])?: .*|test result: FAILED.*|thread '.*' panicked at .*"
+                            r"|---- \S+ stdout ----|error: Bad exit status.*)$")
+
+
+def copr_api(path: str, **params) -> dict:
+    return json.loads(_get(f"{COPR_URL}/api_3/{path}?{urllib.parse.urlencode(params)}"))
+
+
+@dataclass
+class MissingReq:
+    text: str                  # as dnf printed it
+    crate: str | None = None   # None for a non-crate requirement (e.g. pkgconfig(...))
+    features: list[str] = field(default_factory=list)  # "" for crate(name) itself
+    req: str = "*"             # cargo syntax, e.g. ">=1.0.23, <2.0.0"
+    tests_only: bool = False   # only dev-dependencies need it
+
+    @classmethod
+    def parse(cls, text: str) -> "MissingReq":
+        text = text.strip()
+        m = CRATE_REQ_RE.search(text)
+        if not m:
+            return cls(text)
+        name, feat, op, lo, hi = m.groups()
+        parts = [f"{op}{lo.replace('~', '-')}"] if op else []
+        if hi:
+            parts.append(f"<{hi.rstrip('~').replace('~', '-')}")
+        return cls(text, name, [feat or ""], ", ".join(parts) or "*")
+
+    def key(self) -> tuple:
+        return (self.crate, self.req) if self.crate else (self.text,)
+
+    def label(self) -> str:
+        if not self.crate:
+            return self.text
+        feats = [f for f in self.features if f]
+        return f"{self.crate} {self.req}" + (f" [{', '.join(feats)}]" if feats else "")
+
+
+@dataclass
+class ChrootDiag:
+    chroot: str
+    state: str
+    verdict: str   # ok | active | wait | retry | blocked | error
+    notes: list[str] = field(default_factory=list)
+    log: Path | None = None
+    log_url: str | None = None
+    via: set[str] = field(default_factory=set)        # local deps this retry relies on
+    external: list[tuple[MissingReq, str]] = field(default_factory=list)  # missing outside the tree, why
+    build: int | None = None   # the build this result is from
+
+
+@dataclass
+class PackageDiag:
+    pkg: LocalPackage
+    evr: str
+    build: dict | None
+    chroots: dict[str, ChrootDiag]
+
+
+VERDICT_RANK = {"ok": 0, "retry": 1, "wait": 2, "active": 2, "error": 3, "blocked": 4}
+
+
+class CoprState:
+    """Latest COPR build of each local package's current version, diagnosed per chroot."""
+
+    def __init__(self, project: str, root: Path, refresh: bool = False):
+        self.project = project
+        self.owner, _, self.name = project.partition("/")
+        self.local = local_packages(root)
+        self.refresh = refresh
+        self._diag: dict[str, PackageDiag] = {}
+        self._index: dict[str, FedoraIndex] = {}
+        self._kinds: dict[str, dict[str, set[str]]] = {}
+        try:
+            self.project_chroots = sorted(copr_api("project/", ownername=self.owner,
+                                                   projectname=self.name)["chroot_repos"])
+        except urllib.error.HTTPError as exc:
+            die(f"cannot read COPR project {project}: {exc}")
+
+    def index(self, chroot: str) -> FedoraIndex:
+        rel = chroot_release(chroot)
+        if rel not in self._index:
+            self._index[rel] = fedora_index(self.refresh, chroot)
+        return self._index[rel]
+
+    def dep_kinds(self, pkg: LocalPackage) -> dict[str, set[str]]:
+        """crate -> kinds (normal, dev, build) in the package's patched Cargo.toml."""
+        if pkg.crate not in self._kinds:
+            kinds: dict[str, set[str]] = collections.defaultdict(set)
+            if pkg.crate_file and pkg.crate_file.exists():
+                with tempfile.TemporaryDirectory() as tmp:
+                    toml = tomllib.loads((extract_patched(pkg, Path(tmp)) / "Cargo.toml").read_text())
+                for d in manifest_deps(toml):
+                    kinds[d["crate_id"]].add(d["kind"])
+            self._kinds[pkg.crate] = kinds
+        return self._kinds[pkg.crate]
+
+    def builds(self, pkg: LocalPackage, evr: str) -> list[dict]:
+        """Builds of this version, newest first."""
+        try:
+            items = copr_api("build/list/", ownername=self.owner, projectname=self.name,
+                             packagename=f"rust-{pkg.crate}", limit=100)["items"]
+        except urllib.error.HTTPError:
+            items = []
+        return [b for b in sorted(items, key=lambda b: b["id"], reverse=True)
+                if (b.get("source_package") or {}).get("version") == evr
+                or ((b.get("source_package") or {}).get("version") is None and b["state"] in COPR_ACTIVE)]
+
+    def diagnose(self, pkg: LocalPackage) -> PackageDiag:
+        if pkg.crate in self._diag:
+            return self._diag[pkg.crate]
+        evr = spec_query(pkg.spec, "%{version}-%{release}")
+        builds = self.builds(pkg, evr)
+        diag = PackageDiag(pkg, evr, builds[0] if builds else None, {})
+        self._diag[pkg.crate] = diag
+        # each chroot from the newest build that has it: a retry covers only
+        # the chroots that failed, so older builds hold the others' results
+        for build in builds:
+            for bc in copr_api("build-chroot/list/", build_id=build["id"])["items"]:
+                if bc["name"] not in diag.chroots:
+                    diag.chroots[bc["name"]] = self.diagnose_chroot(pkg, build, bc)
+                    diag.chroots[bc["name"]].build = build["id"]
+        if not builds:  # never built: its local dependencies may need a build too
+            for dep in sorted(set(self.dep_kinds(pkg)) & set(self.local)):
+                if dep != pkg.crate and self.local[dep].version:
+                    self.diagnose(self.local[dep])
+        return diag
+
+    def diagnose_chroot(self, pkg: LocalPackage, build: dict, bc: dict) -> ChrootDiag:
+        chroot, state = bc["name"], bc["state"]
+        if state in COPR_OK:
+            return ChrootDiag(chroot, state, "ok")
+        if state in COPR_ACTIVE:
+            return ChrootDiag(chroot, state, "active")
+        if state == "canceled":
+            return ChrootDiag(chroot, state, "retry", ["canceled"])
+        d = ChrootDiag(chroot, state, "error")
+        if not bc.get("result_url"):
+            d.notes.append("no build results; see the build page")
+            return d
+        d.log_url = bc["result_url"].rstrip("/") + "/builder-live.log.gz"
+        d.log = self.fetch_log(build["id"], chroot, bc["result_url"])
+        if not d.log:
+            d.notes.append("build log not available")
+            return d
+        text = d.log.read_text(errors="replace")
+        missing: dict[tuple, MissingReq] = {}  # features of one crate requirement together
+        for ln in text.splitlines():
+            if m := MISSING_RE.search(ln):
+                req = MissingReq.parse(m.group(1) or m.group(2))
+                have = missing.setdefault(req.key(), req)
+                have.features += [f for f in req.features if f not in have.features]
+        if not missing:
+            errors = list(dict.fromkeys(ln.strip() for ln in text.splitlines() if BUILD_ERROR_RE.match(ln.strip())))
+            d.notes += [f"build error: {e}" for e in errors[:8]] or ["failed; no known error pattern in the log"]
+            if len(errors) > 8:
+                d.notes.append(f"… {len(errors) - 8} more error line(s) in the log")
+            return d
+        verdicts = [self.check_missing(pkg, chroot, req, d) for req in missing.values()]
+        d.verdict = max(verdicts, key=VERDICT_RANK.__getitem__)
+        return d
+
+    def check_missing(self, pkg: LocalPackage, chroot: str, req: MissingReq, d: ChrootDiag) -> str:
+        """Explain one missing BuildRequires; returns the verdict it implies."""
+        label = f"missing {req.label()}"
+        if not req.crate:
+            d.notes.append(f"{label}: not a crate; check that {chroot_release(chroot)} ships it")
+            d.external.append((req, "not a crate"))
+            return "blocked"
+        kinds = self.dep_kinds(pkg).get(req.crate, set())
+        if kinds and kinds <= {"dev"}:
+            req.tests_only = True
+            label += " (dev-dependency: only the tests need it)"
+        dep = self.local.get(req.crate)
+        if dep and dep.version and req_matches(req.req, dep.version):
+            dd = self.diagnose(dep)
+            if not dd.build:
+                d.notes.append(f"{label}: local {dep.crate} {dd.evr} has no COPR build; submit it")
+                d.via.add(dep.crate)
+                return "retry"
+            dc = dd.chroots.get(chroot)
+            bid = dc.build if dc else dd.build["id"]
+            blink = link(copr_build_url(bid), str(bid))
+            if dc is None:
+                d.notes.append(f"{label}: local {dep.crate} build {blink} did not include {chroot}; submit it there")
+                d.via.add(dep.crate)
+                return "retry"
+            if dc.verdict == "ok":
+                d.notes.append(f"{label}: local {dep.crate} built there since (build {blink}); resubmit")
+                return "retry"
+            if dc.verdict in ("active", "wait"):
+                d.notes.append(f"{label}: local {dep.crate} is still building there (build {blink}); wait")
+                return "wait"
+            if dc.verdict == "retry":
+                d.notes.append(f"{label}: local {dep.crate} failed there too, and can be resubmitted first")
+                d.via.add(dep.crate)
+                return "retry"
+            d.notes.append(f"{label}: local {dep.crate} failed there too (build {blink}); fix it first")
+            return "blocked"
+        idx = self.index(chroot)
+        rel = chroot_release(chroot)
+        have = idx.versions(req.crate)
+        fitting = [v for v in have if req_matches(req.req, v)]
+        lacking = idx.missing_features(req.crate, fitting[-1], req.features) if fitting else []
+        if fitting and not lacking:
+            d.notes.append(f"{label}: {rel} has {fitting[-1]} now; resubmit")
+            return "retry"
+        if fitting:
+            why = f"{rel} has {fitting[-1]} without feature(s) {', '.join(lacking)}"
+        elif have:
+            why = f"{rel} has only {', '.join(have)}"
+        else:
+            why = f"not in {rel}"
+        if dep:
+            why += f"; the local package is {dep.version or 'not generated'}"
+        d.notes.append(f"{label}: {why}")
+        d.external.append((req, why))
+        return "blocked"
+
+    @staticmethod
+    def fetch_log(build_id: int, chroot: str, result_url: str) -> Path | None:
+        """The build log of a finished chroot, cached (it never changes)."""
+        path = CACHE_DIR / "copr-logs" / f"{build_id}-{chroot}.log"
+        if path.exists():
+            return path
+        base = result_url.rstrip("/")
+        for name, unpack in (("builder-live.log.gz", gzip.decompress), ("builder-live.log", lambda b: b)):
+            try:
+                data = unpack(_get(f"{base}/{name}"))
+            except (urllib.error.URLError, OSError, EOFError):
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            return path
+        return None
+
+
+def copr_retry_plan(stages: list[list[LocalPackage]], root: Path, project: str,
+                    only: list[str]) -> list[list[tuple[LocalPackage, list[str]]]]:
+    """Per stage, the packages and chroots worth resubmitting (see CoprState)."""
+    state = CoprState(project, root)
+    selected = {p.crate for s in stages for p in s}
+    plan = []
+    for s in stages:
+        out = []
+        for p in s:
+            d = state.diagnose(p)
+            if not d.build:
+                info(f"   {p.crate}: no COPR build of {d.evr} yet; submitting it")
+                out.append((p, only))
+                continue
+            retry = [c for c, cd in sorted(d.chroots.items()) if cd.verdict == "retry" and (not only or c in only)]
+            for c in retry:
+                for dep in sorted(d.chroots[c].via - selected):
+                    action(f"{p.crate}: {c} needs {dep} resubmitted as well; add it to the command")
+            left: dict[str, list[str]] = collections.defaultdict(list)
+            for c, cd in sorted(d.chroots.items()):
+                if cd.verdict not in ("ok", "retry") and (not only or c in only):
+                    left["still building" if cd.verdict in ("active", "wait") else cd.verdict].append(c)
+            if left:
+                info(f"   {p.crate}: not resubmitting "
+                     + "; ".join(f"{why}: {' '.join(cs)}" for why, cs in left.items()) + " (see 'copr-status')")
+            if retry:
+                out.append((p, retry))
+        plan.append(out)
+    return plan
+
+
+def group_chroots(diags: dict[str, ChrootDiag]) -> list[tuple[list[str], ChrootDiag]]:
+    """Chroots with the same verdict and notes, together."""
+    groups: dict[tuple, list[ChrootDiag]] = {}
+    for c in sorted(diags):
+        cd = diags[c]
+        groups.setdefault((cd.verdict, tuple(cd.notes), cd.build), []).append(cd)
+    return [([cd.chroot for cd in g], g[0]) for g in groups.values()]
+
+
+def cmd_copr_status(args) -> None:
+    global _HYPERLINKS
+    if args.json:
+        _HYPERLINKS = False
+    stages = build_stages(select(args.root, args.crates, args.all), args.root, warn_outside=False)
+    state = CoprState(args.project, args.root, args.refresh)
+    diags = [[state.diagnose(p) for p in s] for s in stages]
+    for pd in (pd for s in diags for pd in s):  # restrict to the chroots asked for
+        pd.chroots = {c: cd for c, cd in pd.chroots.items() if not args.chroot or c in args.chroot}
+    if args.json:
+        print(json.dumps([{
+            "crate": pd.pkg.crate, "evr": pd.evr, "stage": i,
+            "build": pd.build["id"] if pd.build else None,
+            "chroots": {c: {"build": cd.build, "state": cd.state, "verdict": cd.verdict, "notes": cd.notes,
+                            "log": str(cd.log) if cd.log else None, "log_url": cd.log_url}
+                        for c, cd in pd.chroots.items()},
+        } for i, s in enumerate(diags, 1) for pd in s], indent=2))
+        return
+    label = {"ok": "ok", "active": "BUILDING", "wait": "WAIT", "retry": "RETRY", "blocked": "BLOCKED",
+             "error": "FAILED"}
+    for i, s in enumerate(diags, 1):
+        info(f"=== stage {i}")
+        for pd in s:
+            if not pd.build:
+                info(f"{pd.pkg.crate} {pd.evr}: no COPR build of this version")
+                continue
+            info(f"{pd.pkg.crate} {pd.evr}: build {link(copr_build_url(pd.build['id']), str(pd.build['id']))}")
+            for chroots, cd in group_chroots(pd.chroots):
+                older = (f"  (build {link(copr_build_url(cd.build), str(cd.build))})"
+                         if cd.build != pd.build["id"] else "")
+                info(f"   {label[cd.verdict]:8} {' '.join(chroots)}{older}")
+                for n in cd.notes:
+                    info(f"            {n}")
+                if cd.log:
+                    info(f"            log: {cd.log}" + (f" ({len(chroots)} chroots; this is {cd.chroot})"
+                                                          if len(chroots) > 1 else ""))
+    all_pd = [pd for s in diags for pd in s]
+    verdicts = collections.Counter(cd.verdict for pd in all_pd for cd in pd.chroots.values())
+    # every package looked at, including dependencies outside the selection
+    retry = [pd.pkg.crate for pd in state._diag.values()
+             if not pd.build or any(cd.verdict == "retry" for cd in pd.chroots.values())]
+    info("")
+    info("summary: " + (", ".join(f"{n} {label[v].lower()}" for v, n in sorted(
+        verdicts.items(), key=lambda kv: VERDICT_RANK[kv[0]])) or "no builds"))
+    if verdicts["active"] or verdicts["wait"]:
+        info("- builds are still running: run 'copr-status' again when they have finished")
+    if retry:
+        me = f"rust-deps --root {args.root}"
+        only = "".join(f" -r {c}" for c in args.chroot)
+        info(f"- resubmit what can succeed now:\n    {me} copr --retry-failed --project {args.project}{only} "
+             + " ".join(retry))
+    external: dict[str, dict[str, tuple[str, set[str]]]] = collections.defaultdict(dict)
+    tests_only = set()
+    for pd in all_pd:
+        for cd in pd.chroots.values():
+            for req, why in cd.external:
+                _, users = external[chroot_release(cd.chroot)].setdefault(req.label(), (why, set()))
+                users.add(pd.pkg.crate + (" (tests)" if req.tests_only else ""))
+                if req.tests_only:
+                    tests_only.add(chroot_release(cd.chroot))
+    if external:
+        info("- missing from a target and not in this tree (decide per target: package them there "
+             "with 'resolve -r <chroot>' and 'init -r <chroot>', or leave the target out):")
+        for rel, reqs in sorted(external.items()):
+            info(f"    {rel}:")
+            for lbl, (why, users) in sorted(reqs.items()):
+                info(f"      {lbl}  ({why}; needed by {', '.join(sorted(users))})")
+        if tests_only:
+            info("  '(tests)': only the tests need it; building that chroot without them is possible for "
+                 "the whole project: copr-cli edit-chroot --rpmbuild-without check "
+                 f"{args.project}/<chroot> (targets: {', '.join(sorted(tests_only))})")
+    errors = sorted({pd.pkg.crate for pd in all_pd for cd in pd.chroots.values() if cd.verdict == "error"})
+    if errors:
+        info(f"- build errors in: {', '.join(errors)}. Read the logs; reproduce with "
+             "'mock-chain -r <chroot>', fix, 'srpm', then submit them and their dependents with "
+             "'copr -r <chroot>'")
 
 
 # ─── fedora-review ───────────────────────────────────────────────────────────
@@ -2164,7 +2538,18 @@ def main() -> None:
     sp.add_argument("-r", "--chroot", action="append", default=[])
     sp.add_argument("-n", "--dry-run", action="store_true")
     sp.add_argument("--wait", action="store_true", help="wait until all builds have finished")
+    sp.add_argument("--retry-failed", action="store_true",
+                    help="resubmit only the chroots whose failure can succeed now (see copr-status), "
+                         "and packages with no build of their current version")
     sp.set_defaults(func=cmd_copr)
+
+    sp = sub.add_parser("copr-status", help="diagnose the COPR builds of the current versions per chroot (read-only)")
+    with_sel(sp)
+    sp.add_argument("--project", required=True, help="COPR project, e.g. user/project")
+    sp.add_argument("-r", "--chroot", action="append", default=[], help="only these chroots (repeatable)")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--refresh", action="store_true", help="refresh the cached crate lists of the targets")
+    sp.set_defaults(func=cmd_copr_status)
 
     sp = sub.add_parser("review", help="run fedora-review on each package (after mock-chain)")
     with_sel(sp)
