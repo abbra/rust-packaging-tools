@@ -386,7 +386,9 @@ package as an update. `adopt` records that the package is in Fedora in
 
 - `review-plan`, `review-request` and `review-status` do not ask for a review:
   the package needs nothing when Rawhide has its version, or is an update (a
-  pull request to its dist-git) when the version here is newer.
+  pull request to its dist-git) when the version here is newer. A package
+  adopted with `--mark-only` needs nothing either way: its packaging is for
+  the targets that lack the crate.
 - `copr`, `check-targets` and `copr-status` build it only in the chroots whose
   release does not have this version, so it drops out of chroots as Fedora or
   EPEL catches up. `targets.toml` is not needed any more.

@@ -3127,6 +3127,11 @@ def review_plan(pkgs: list[LocalPackage], root: Path, project: str | None, chroo
                 source = f"{how} dist-git {dg.get('branch')} {str(dg.get('commit', ''))[:10]}"
                 if pkg.version in rawhide.versions(pkg.crate):
                     item = PlanItem(pkg, "skip", "", f"in Fedora ({source}); nothing to submit", [])
+                elif dg.get("packaging") == "local":
+                    # the local packaging is for the targets that lack the crate, not a proposal for Fedora
+                    item = PlanItem(pkg, "skip", "", f"in Fedora (Rawhide: {have}; {source}): packaged here only "
+                                    f"for targets that lack {pkg.version}; to update Fedora, 'adopt {pkg.crate}' "
+                                    "(without --mark-only), then 'dist-git'", [])
                 else:
                     item = PlanItem(pkg, "update", "", f"in Fedora (Rawhide: {have}; {source}): a pull request "
                                     f"to its dist-git with {pkg.version}", [])
