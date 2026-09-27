@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -2544,6 +2545,7 @@ def cmd_doctor(args) -> None:
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # quiet exit when piped into head
     if os.environ.get(EDITOR_ENV) and len(sys.argv) == 2 and sys.argv[1].endswith("Cargo.toml"):
         editor_mode(sys.argv[1])
         return
