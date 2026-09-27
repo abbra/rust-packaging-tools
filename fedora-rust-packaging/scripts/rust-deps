@@ -458,8 +458,13 @@ def apply_edits(text: str, edits: dict) -> str:
 
     if add_dev := edits.get("add-dev-dependencies"):
         text = text.rstrip("\n") + "\n"
-        for name, ver in add_dev.items():
-            text += f'\n[dev-dependencies.{name}]\nversion = "{ver}"\n'
+        for name, spec in add_dev.items():  # "1.0", or {version = "1.0", features = [...]}
+            spec = {"version": spec} if isinstance(spec, str) else spec
+            text += f'\n[dev-dependencies.{name}]\nversion = {json.dumps(spec["version"])}\n'
+            if spec.get("features"):
+                text += f"features = {json.dumps(spec['features'])}\n"
+            if spec.get("default-features") is False:
+                text += "default-features = false\n"
     if declare:
         values = ", ".join(json.dumps(f) for f in dropped)
         checks = [json.dumps(c) for c in lint.get("check-cfg", [])] + [f"'cfg(feature, values({values}))'"]
