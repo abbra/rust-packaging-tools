@@ -156,6 +156,8 @@ Read them as follows (forms can be combined with `--root <dir>`):
      every target's crates in seconds. Handle what it reports like `BLOCKED`
      below *before* submitting. `copr` refuses to submit while it finds
      problems; pass `--force` only when the user decided to accept them.
+   - **After submitting**, run `$T copr-status --all --project <p> --wait` in
+     the background and report when it ends.
    - **COPR failures** (any chroot, any time the user reports failed COPR
      builds): run `$T copr-status --all --project <p>` (read-only) and follow
      "COPR build failures" in `references/MANUAL.md`.
@@ -172,9 +174,9 @@ Read them as follows (forms can be combined with `--root <dir>`):
        optional features whose crates the target lacks; if a consumer needs
        such a feature (e.g. `strum/derive`), package that crate as well and
        remove the drop.
-     - `FAILED`: summarize the log with `copr-log`, reproduce with
-       `mock-chain -r <chroot>` (`centos-stream+epel-N` for `rhel+epel-N`),
-       fix, and resubmit with `copr -r <chroot>`.
+     - `FAILED`: run the `copr-log` and `mock-chain` commands it prints (the
+       mock chroot for `rhel+epel-N` is `centos-stream+epel-N`), fix, and
+       resubmit with `copr -r <chroot>`.
      - **Warnings** the user asks about (in a running or finished build):
        `$T copr-log <crate> -r <chroot> --project <p>` explains the known
        ones, e.g. `unexpected cfg` for a feature dropped in
