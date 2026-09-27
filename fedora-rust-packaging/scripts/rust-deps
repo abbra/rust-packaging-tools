@@ -1653,7 +1653,8 @@ def cmd_copr(args) -> None:
     if not args.force:
         pairs = [(p, cs or project_chroots(args.project)) for s in plan for p, cs in s]
         if n := report_target_check(pairs, local_packages(args.root), quiet=True):
-            die(f"{n} BuildRequires would not resolve in the chroots above; those builds would fail. "
+            die(f"{n} requirement(s) would not resolve in the chroots above; those builds would fail or their "
+                "subpackages could not be installed. "
                 "Fix them (see 'COPR build failures' in the manual), leave those chroots out with -r, "
                 "or pass --force to submit anyway")
     ids = copr_submit(plan, args.project, args.dry_run)
@@ -2261,6 +2262,28 @@ def check_target(pkg: LocalPackage, chroot: str, local: dict[str, LocalPackage],
         elif dep:
             why += f"; the local package is {dep.version or 'not generated'}"
         problems.append(TargetProblem(req, why, True))
+    # each feature subpackage requires what its feature refers to: crate(dep/feat)
+    deps = {d["name"]: d for d in manifest_deps(toml) if d["kind"] == "normal" and not is_foreign(d["target"])}
+    for feat, items in sorted(toml.get("features", {}).items()):
+        for item in items:
+            if "/" not in item or item.startswith("dep:"):
+                continue
+            name, dfeat = item.split("/", 1)
+            d = deps.get(name.rstrip("?"))
+            if not d:
+                continue
+            req = MissingReq(item, d["crate_id"], [dfeat], d["req"])
+            dep = local.get(d["crate_id"])
+            if dep and dep.version and dep.builds_in(chroot) and req_matches(d["req"], dep.version):
+                if dfeat not in provided_features(build_info(dep)[0]):
+                    problems.append(TargetProblem(req, f"feature '{feat}' needs it, but the local {dep.crate} lacks "
+                                                  f"feature {dfeat} (dropped?): +{feat}-devel could not be installed; "
+                                                  f"drop '{feat}' as well", False))
+                continue
+            version, why = target_availability(idx, rel, req)
+            if not version and target_availability(idx, rel, MissingReq(item, d["crate_id"], [""], d["req"]))[0]:
+                problems.append(TargetProblem(req, f"feature '{feat}' needs it: {why}; +{feat}-devel could not be "
+                                              "installed", True))
     if not pkg.compat and idx.versions(pkg.crate) and pkg.version not in idx.versions(pkg.crate):
         notes.append(f"{rel} ({', '.join(idx.versions(pkg.crate))})")
     return problems, notes
@@ -2332,7 +2355,7 @@ def cmd_check_targets(args) -> None:
     n = report_target_check([(p, cs) for p, cs in plan if cs], local_packages(args.root), args.refresh,
                             quiet=args.quiet)
     if n:
-        die(f"{n} BuildRequires would not resolve")
+        die(f"{n} requirement(s) would not resolve (BuildRequires, or what a feature subpackage requires)")
     info(f"all BuildRequires resolve in {', '.join(sorted({chroot_release(c) for c in chroots}))}")
 
 
