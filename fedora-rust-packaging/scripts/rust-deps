@@ -1915,7 +1915,7 @@ COPR_ACTIVE = {"importing", "pending", "starting", "running", "waiting"}
 MISSING_RE = re.compile(r"nothing provides (?:requested )?(.+?)(?: needed by \S+.*)?\s*$"
                         r"|No match(?:ing package)? (?:for argument|to install):? '?(.+?)'?\s*$")
 CRATE_REQ_RE = re.compile(r"crate\(([^/)\s]+)(?:/([^)\s]+))?\)(?:\s*(>=|=|>)\s*([^\s)]+))?"
-                          r"(?:\s+with\s+crate\([^)]*\)\s*<\s*([^\s)]+))?")
+                          r"(?:\s+with\s+crate\([^)]*\)\s*(<=|<)\s*([^\s)]+))?")
 # dnf4/dnf5: "cannot install both rust-x-devel-0.16.1-1.el10.noarch from epel and rust-x-devel-0.17.1-1.el10.noarch from copr_base"
 CONFLICT_RE = re.compile(r"cannot install both (\S+) from (\S+) and (\S+) from (\S+)")
 COPR_REPO = "copr_base"  # the project's own repository in COPR's build roots
@@ -2086,10 +2086,10 @@ class MissingReq:
         m = CRATE_REQ_RE.search(text)
         if not m:
             return cls(text)
-        name, feat, op, lo, hi = m.groups()
+        name, feat, op, lo, op_hi, hi = m.groups()
         parts = [f"{op}{lo.replace('~', '-')}"] if op else []
-        if hi:
-            parts.append(f"<{hi.rstrip('~').replace('~', '-')}")
+        if hi:  # "< 2.0.0~" (a caret requirement), or "<= 0.8.0" (as a spec may relax it)
+            parts.append(f"{op_hi}{hi.rstrip('~').replace('~', '-')}")
         return cls(text, name, [feat or ""], ", ".join(parts) or "*")
 
     def key(self) -> tuple:

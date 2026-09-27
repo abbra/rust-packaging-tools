@@ -277,6 +277,8 @@ def test_foreign_shebangs(tmp_path):
     (" Problem 1: nothing provides requested (crate(outref/default) >= 0.5.0 with crate(outref/default) < 0.6.0~)",
      "outref >=0.5.0, <0.6.0 [default]"),
     ("No matching package to install: 'pkgconfig(openssl) >= 3.0'", "pkgconfig(openssl) >= 3.0"),
+    ("nothing provides requested (crate(claims/default) >= 0.7.1 with crate(claims/default) <= 0.8.0)",
+     "claims >=0.7.1, <=0.8.0 [default]"),
 ])
 def test_missing_requirement_parsing(line, label):
     m = rd.MISSING_RE.search(line)
