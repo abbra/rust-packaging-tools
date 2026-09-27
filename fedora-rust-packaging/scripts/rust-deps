@@ -1158,6 +1158,12 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         if new.crate_file.exists() and not (requires.get("build") or requires.get("lib")):
             if hint := sys_hint(tomllib.loads(read_crate_member(new.crate_file, "Cargo.toml"))):
                 action(f"{pkg.crate}: {hint}")
+        if shebangs := foreign_shebangs(new.crate_file, tomllib.loads(pkg.config_file.read_text())):
+            listing = ", ".join(f"{f} (#!{i})" for f, i in shebangs)
+            action(f"{pkg.crate}: executable files with an interpreter outside /usr/bin: {listing}; rpm makes "
+                   "-devel require that interpreter, which no package provides. Remove them or drop their "
+                   "executable bit in rust2rpm.toml [scripts.prep] (e.g. post = [\"rm -r wasm/\"]), with a "
+                   "comment saying why")
         if compiled := compiled_doc_files(new.crate_file, new.spec):
             action(f"{pkg.crate}: {', '.join(compiled)} marked %doc but compiled into the crate (include_str!); "
                    "the package must work without its documentation, so add to [package] in rust2rpm.toml: "
@@ -1214,6 +1220,38 @@ def compiled_doc_files(crate_file: Path, spec: Path) -> list[str]:
                         if m.endswith(".rs") and not m.startswith(("tests/", "benches/", "examples/")))
     return [d for d in docs
             if re.search(r'include_(?:str|bytes)!\s*\(\s*"(?:[^"]*/)?' + re.escape(d) + '"', sources)]
+
+
+SYSTEM_BIN_DIRS = ("/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/")
+
+
+def foreign_shebangs(crate_file: Path, config: dict) -> list[tuple[str, str]]:
+    """Executable files whose #! interpreter is outside the system's bin directories.
+
+    rpm turns the interpreter of an executable file into a requirement of the
+    package that ships it, so the -devel package would require, e.g.,
+    /usr/local/bin/python, which no package provides.  Files that the prep
+    scripts of rust2rpm.toml mention (removed, or made non-executable) count
+    as handled.
+    """
+    scripts = config.get("scripts", {}).get("prep", {})
+    handled = " ".join(scripts.get("pre", []) + scripts.get("post", []))
+    words = {w.strip("/").rstrip("/") for w in handled.split() if not w.startswith("-")}
+    found = []
+    with tarfile.open(crate_file) as tf:
+        for m in tf.getmembers():
+            if not m.isfile() or not m.mode & 0o111:
+                continue
+            path = m.name.split("/", 1)[1] if "/" in m.name else m.name
+            if any(w and (path == w or path.startswith(w + "/")) for w in words):
+                continue
+            first = tf.extractfile(m).readline(200).decode(errors="replace").strip()
+            if not first.startswith("#!"):
+                continue
+            interpreter = first[2:].split()[0] if first[2:].split() else ""
+            if interpreter and not interpreter.startswith(SYSTEM_BIN_DIRS):
+                found.append((path, interpreter))
+    return found
 
 
 def cmd_regen(args) -> None:

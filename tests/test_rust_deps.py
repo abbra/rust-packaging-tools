@@ -200,6 +200,34 @@ def test_targets_toml(tmp_path):
     assert not pkg.builds_in("fedora-45-x86_64")
 
 
+def make_crate(tmp_path: Path, files: dict[str, tuple[str, int]]) -> Path:
+    """A .crate archive with the given files: path -> (content, mode)."""
+    import io
+    import tarfile
+    crate = tmp_path / "demo-1.0.0.crate"
+    with tarfile.open(crate, "w:gz") as tf:
+        for name, (content, mode) in files.items():
+            data = content.encode()
+            info = tarfile.TarInfo(f"demo-1.0.0/{name}")
+            info.size, info.mode = len(data), mode
+            tf.addfile(info, io.BytesIO(data))
+    return crate
+
+
+def test_foreign_shebangs(tmp_path):
+    crate = make_crate(tmp_path, {
+        "wasm/emscripten/runner.py": ("#!/usr/local/bin/python\n", 0o755),
+        "scripts/ok.sh": ("#!/usr/bin/bash\n", 0o755),
+        "scripts/env.py": ("#!/usr/bin/env python3\n", 0o755),
+        "not-executable.py": ("#!/usr/local/bin/python\n", 0o644),
+        "src/lib.rs": ("", 0o644),
+    })
+    assert rd.foreign_shebangs(crate, {}) == [("wasm/emscripten/runner.py", "/usr/local/bin/python")]
+    # removed (or made non-executable) by the prep scripts: handled
+    handled = {"scripts": {"prep": {"post": ["rm -r newsfragments/ wasm/"]}}}
+    assert rd.foreign_shebangs(crate, handled) == []
+
+
 # ─── COPR logs ──────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("line, label", [
