@@ -141,6 +141,8 @@ Caches live in `~/.cache/rust-packaging-tools`:
   and `copr-status`; one list per target release for `-r CHROOT`
 - the cargo target directory used by trials, and trial logs
 - COPR build logs (`copr-logs/<build>-<chroot>.log`)
+- the IDs of builds `copr` submitted (`copr-builds/`), which COPR lists under the
+  package only after importing the SRPM
 
 To query another release than the running system, pass `-r CHROOT` (see
 "COPR build failures" for how targets map to repositories), or set
