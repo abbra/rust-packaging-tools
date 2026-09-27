@@ -3070,6 +3070,117 @@ def cmd_review_request(args) -> None:
         die(f"no review request for: {', '.join(failed)}")
 
 
+# ─── review plan (read-only) ─────────────────────────────────────────────────
+
+@dataclass
+class PlanItem:
+    pkg: LocalPackage
+    kind: str            # review | update | skip
+    state: str           # filed | ready | not-ready | (for update/skip: "")
+    detail: str          # bug link, draft path, what is missing, why skipped
+    after: list[str]     # RPM names this one waits for (their tickets, or their updates)
+
+
+def dist_git_has(rpm_name: str) -> bool:
+    try:
+        _get(f"https://src.fedoraproject.org/api/0/rpms/{rpm_name}")
+        return True
+    except urllib.error.HTTPError:
+        return False
+
+
+def review_plan(pkgs: list[LocalPackage], root: Path, project: str | None, chroot: str) -> list[list[PlanItem]]:
+    """The packages by build stage, each with how it gets into Fedora and whether it is ready."""
+    stages = build_stages(pkgs, root, warn_outside=False)
+    local = local_packages(root)
+    deps = local_deps([p for s in stages for p in s], root)
+    rawhide = fedora_index(False, "fedora-rawhide-x86_64")
+    plan, kinds = [], {}
+    for stage in stages:
+        items = []
+        for pkg in stage:
+            if pkg.targets is not None:
+                item = PlanItem(pkg, "skip", "", f"built only for {', '.join(pkg.targets)} (targets.toml); "
+                                "Rawhide has the crate, so there is nothing to review", [])
+            elif dist_git_has(pkg.rpm_name):
+                have = ", ".join(rawhide.versions(pkg.crate)) or "no build yet"
+                item = PlanItem(pkg, "update", "", f"Fedora has {pkg.rpm_name} (Rawhide: {have}): update its "
+                                "dist-git repository (a pull request) instead of a review", [])
+            else:
+                item = PlanItem(pkg, "review", "", "", [])
+                bug = request_state(pkg).get("bug")
+                if bug:
+                    item.state, item.detail = "filed", bug_url(bug)
+                else:
+                    try:
+                        srpm_of(pkg)
+                        problem = local_review_problem(pkg)
+                    except SystemExit:
+                        problem = "no SRPM of the current version; run 'srpm'"
+                    if not problem and project:
+                        problem = copr_review_urls(pkg, project, chroot)[1]
+                    draft = pkg.dir / REQUEST_DRAFT
+                    if problem:
+                        item.state, item.detail = "not-ready", problem
+                    elif not draft.exists() or draft.stat().st_mtime < pkg.spec.stat().st_mtime:
+                        item.state, item.detail = "not-ready", "no current draft; run 'review-request' (without --file)"
+                    else:
+                        item.state, item.detail = "ready", str(draft)
+            kinds[pkg.crate] = item.kind
+            items.append(item)
+        plan.append(items)
+    for item in (i for s in plan for i in s):
+        if item.kind != "skip":
+            item.after = sorted(local[d].rpm_name for d in deps.get(item.pkg.crate, ())
+                                if kinds.get(d) in ("review", "update"))
+    return plan
+
+
+def cmd_review_plan(args) -> None:
+    plan = review_plan(select(args.root, args.crates, args.all), args.root, args.project, args.chroot)
+    items = [i for s in plan for i in s]
+    if args.json:
+        print(json.dumps([{"stage": n, "package": i.pkg.rpm_name, "crate": i.pkg.crate, "version": i.pkg.version,
+                           "kind": i.kind, "state": i.state, "detail": i.detail, "after": i.after}
+                          for n, s in enumerate(plan, 1) for i in s], indent=2))
+        return
+    label = {"filed": "FILED", "ready": "READY", "not-ready": "NOT READY"}
+    step = 0
+    info("Submit in this order: a ticket names the tickets of the packages it waits for (Depends On), "
+         "and reviews are imported and built in the same order.")
+    for n, stage in enumerate(plan, 1):
+        todo = [i for i in stage if i.kind != "skip"]
+        if not todo:
+            continue
+        info(f"\n=== stage {n}")
+        for i in todo:
+            step += 1
+            what = "update" if i.kind == "update" else label[i.state]
+            info(f"{step:3}. {i.pkg.rpm_name} {i.pkg.version}  {what}")
+            info(f"       {i.detail}")
+            if i.after:
+                info(f"       after: {', '.join(i.after)}")
+    skipped = [i for i in items if i.kind == "skip"]
+    if skipped:
+        info("\nno review needed:")
+        for i in skipped:
+            info(f"     {i.pkg.rpm_name} {i.pkg.version}: {i.detail}")
+    others = sorted(d.name for d in args.root.iterdir() if d.is_dir() and not (d / "rust2rpm.toml").exists()
+                    and any(d.glob("*.spec")))
+    if others and args.all:
+        info("\nother specs in the root (not managed by rust-deps):")
+        for d in others:
+            for name in (f.stem for f in sorted((args.root / d).glob("*.spec"))):
+                how = ("Fedora has it: update its dist-git repository" if dist_git_has(name) else
+                       "new: a review by hand, after the Rust packages it builds against")
+                info(f"     {name}: {how} ({args.root / d})")
+    counts = collections.Counter(i.state or i.kind for i in items)
+    info("\nsummary: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
+    if counts["ready"]:
+        info(f"file the READY ones, in this order: rust-deps review-request --project {args.project or 'P'} "
+             "--fas NAME --file " + " ".join(i.pkg.crate for i in items if i.state == "ready"))
+
+
 # ─── review status (Bugzilla, read-only) ─────────────────────────────────────
 
 # accounts that comment automatically (repository creation, Bodhi, release monitoring)
@@ -3617,6 +3728,14 @@ def main() -> None:
     sp.add_argument("--file", action="store_true",
                     help="file new requests / post updated URLs in Bugzilla (default: only write drafts)")
     sp.set_defaults(func=cmd_review_request)
+
+    sp = sub.add_parser("review-plan", help="what to submit for review, in which order, and which drafts are "
+                        "ready (read-only)")
+    with_sel(sp)
+    sp.add_argument("--project", help="COPR project holding the builds; checks the published spec and SRPM")
+    sp.add_argument("-r", "--chroot", default="fedora-rawhide-x86_64", help="COPR chroot to check (default %(default)s)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_review_plan)
 
     sp = sub.add_parser("review-status", help="show the state of the Bugzilla review tickets (read-only)")
     with_sel(sp)

@@ -384,3 +384,40 @@ def test_write_tmt_replaces_earlier_files(tmp_path, monkeypatch):
 ])
 def test_tmt_image(chroot, image):
     assert rd.tmt_image(chroot) == image
+
+
+# ─── review plan ────────────────────────────────────────────────────────────
+
+def test_review_plan(tmp_path, monkeypatch):
+    import os, json as _json
+    pkgs = {}
+    for crate, spec_name in [("zmij", "rust-zmij"), ("synta-derive", "rust-synta-derive"),
+                             ("synta", "rust-synta"), ("synta-cbor", "rust-synta-cbor"),
+                             ("ciborium", "rust-ciborium")]:
+        make_package(tmp_path, crate, spec_name, "1.0.0")
+    (tmp_path / "ciborium" / rd.TARGETS_FILE).write_text('only = ["rhel+epel-10"]\n')
+    (tmp_path / "synta-cbor" / rd.REQUEST_STATE).write_text(_json.dumps({"bug": 2600001}))
+    draft = tmp_path / "synta-derive" / rd.REQUEST_DRAFT
+    draft.write_text("Summary: Review Request: rust-synta-derive - derive macros\n")
+    os.utime(draft, (2_000_000_000, 2_000_000_000))  # newer than the spec
+    local = rd.local_packages(tmp_path)
+    stages = [[local["zmij"], local["synta-derive"], local["ciborium"]], [local["synta"]], [local["synta-cbor"]]]
+    monkeypatch.setattr(rd, "build_stages", lambda pkgs, root, warn_outside=True: stages)
+    monkeypatch.setattr(rd, "local_deps", lambda pkgs, root: {
+        "synta": {"synta-derive", "zmij"}, "synta-cbor": {"synta", "ciborium"}})
+    monkeypatch.setattr(rd, "dist_git_has", lambda name: name == "rust-zmij")
+    monkeypatch.setattr(rd, "fedora_index", lambda refresh=False, chroot=None: rd.FedoraIndex({"zmij": {"0.9.0": {""}}}))
+    monkeypatch.setattr(rd, "srpm_of", lambda pkg: pkg.dir / "x.src.rpm")
+    monkeypatch.setattr(rd, "local_review_problem", lambda pkg: None if pkg.crate == "synta-derive"
+                        else "no local fedora-review result; run 'review' first")
+    plan = rd.review_plan(list(local.values()), tmp_path, None, "fedora-rawhide-x86_64")
+    by = {i.pkg.crate: i for s in plan for i in s}
+    assert (by["zmij"].kind, by["ciborium"].kind) == ("update", "skip")
+    assert "Rawhide: 0.9.0" in by["zmij"].detail
+    assert (by["synta-derive"].state, by["synta-derive"].detail) == ("ready", str(draft))
+    assert by["synta"].state == "not-ready" and by["synta"].after == ["rust-synta-derive", "rust-zmij"]
+    assert by["synta-cbor"].state == "filed" and by["synta-cbor"].detail.endswith("/2600001")
+    assert by["synta-cbor"].after == ["rust-synta"]  # ciborium is not reviewed here
+    os.utime(draft, (1, 1))  # a draft older than the spec does not count
+    plan = rd.review_plan(list(local.values()), tmp_path, None, "fedora-rawhide-x86_64")
+    assert [i.state for s in plan for i in s if i.pkg.crate == "synta-derive"] == ["not-ready"]
