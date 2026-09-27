@@ -388,7 +388,7 @@ for every chroot prints one of:
 | `ok` | succeeded (or skipped by ExclusiveArch) | nothing |
 | `BUILDING` / `WAIT` | still running, or waiting for a local dependency that still builds there | run `copr-status` again later |
 | `RETRY` | failed, but the cause is gone: the local dependency it lacked is built there now, or can be resubmitted before it; the target now has the crate; or the build was canceled | `copr --retry-failed` |
-| `BLOCKED` | a BuildRequires is missing and will stay missing: the target lacks the crate (or the needed version or features) and the tree has no package for it, or a local dependency failed there for such a reason | decide, see below |
+| `BLOCKED` | a BuildRequires is missing and will stay missing: the target lacks the crate (or the needed version or features) and the tree has no package for it, or a local dependency failed there for such a reason; or two versions of a package conflict (see "Compat packages") | decide, see below |
 | `FAILED` | a compile or test error (the matching log lines are shown) | fix the package |
 
 A missing crate is marked "dev-dependency: only the tests need it" when only
@@ -467,6 +467,34 @@ RHEL and CentOS ship none):
 
 Crates are noarch, so the architecture does not matter; one list per release
 is cached. Repositories added to the COPR project itself are not queried.
+
+### Compat packages
+
+Two versions of a crate can only be installed together if their packages
+have different names. rust2rpm's compat packages do that: `rust-<crate>` at
+0.17.1 becomes `rust-<crate>0.17`, with the same `crate(...)` provides.
+
+A build needs both versions when it depends on the local newer version and,
+through another package, on the target's older one. `jsonschema` on EPEL 10
+needs `hashbrown` 0.17 (through `referencing`) and EPEL's 0.16 (through
+`reqwest` → `h2` → `indexmap`). dnf then reports `cannot install both
+rust-hashbrown-devel-0.16.1 … from epel and rust-hashbrown-devel-0.17.1 …
+from copr_base`; `copr-status` shows it as a `conflict`, and `check-targets`
+warns in advance about every local package that shares its name with other
+versions the target ships. mock may not show it: its CentOS Stream chroots
+use a different EPEL than COPR's RHEL ones.
+
+To fix it:
+
+```
+$T regen --compat hashbrown        # rust-hashbrown0.17.spec replaces rust-hashbrown.spec
+$T trial hashbrown && $T srpm hashbrown
+copr-cli delete-package user/project --name rust-hashbrown   # else builds can still pick it
+$T copr --retry-failed --all --project user/project
+```
+
+Deleting the old package from COPR removes its builds; it is a public action,
+so ask first. `copr-status` keeps the conflict `BLOCKED` until it is gone.
 
 ## Resolving `ACTION NEEDED`
 

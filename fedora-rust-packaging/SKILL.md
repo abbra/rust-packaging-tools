@@ -177,6 +177,9 @@ Read them as follows (forms can be combined with `--root <dir>`):
        optional features whose crates the target lacks; if a consumer needs
        such a feature (e.g. `strum/derive`), package that crate as well and
        remove the drop.
+     - `BLOCKED` by a `conflict` (two versions of a package that cannot be
+       installed together): follow "Compat packages" in the manual. Deleting
+       the old package from COPR needs the user's approval.
      - `FAILED`: run the `copr-log` and `mock-chain` commands it prints (the
        mock chroot for `rhel+epel-N` is `centos-stream+epel-N`), fix, and
        resubmit with `copr -r <chroot>`.

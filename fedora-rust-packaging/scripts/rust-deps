@@ -1535,6 +1535,41 @@ MISSING_RE = re.compile(r"nothing provides (?:requested )?(.+?)(?: needed by \S+
                         r"|No match(?:ing package)? (?:for argument|to install):? '?(.+?)'?\s*$")
 CRATE_REQ_RE = re.compile(r"crate\(([^/)\s]+)(?:/([^)\s]+))?\)(?:\s*(>=|=|>)\s*([^\s)]+))?"
                           r"(?:\s+with\s+crate\([^)]*\)\s*<\s*([^\s)]+))?")
+# dnf4/dnf5: "cannot install both rust-x-devel-0.16.1-1.el10.noarch from epel and rust-x-devel-0.17.1-1.el10.noarch from copr_base"
+CONFLICT_RE = re.compile(r"cannot install both (\S+) from (\S+) and (\S+) from (\S+)")
+COPR_REPO = "copr_base"  # the project's own repository in COPR's build roots
+
+
+@dataclass
+class Conflict:
+    """Two versions of one package that a build needs together but cannot install."""
+    name: str      # binary package, e.g. rust-hashbrown-devel
+    crate: str     # e.g. hashbrown
+    sides: list[tuple[str, str]]  # (version, repository)
+
+    @classmethod
+    def parse(cls, m: re.Match) -> "Conflict | None":
+        (nevra1, repo1, nevra2, repo2) = m.groups()
+        n1, v1, _ = nevra1.rsplit("-", 2)
+        n2, v2, _ = nevra2.rsplit("-", 2)
+        crate = re.fullmatch(r"rust-(.+?)(?:\+[^+]+)?-devel", n1)
+        if n1 != n2 or not crate:
+            return None
+        return cls(n1, crate.group(1), [(v1, repo1), (v2, repo2)])
+
+    def label(self) -> str:
+        return (f"{self.name} {self.sides[0][0]} ({self.sides[0][1]}) and {self.sides[1][0]} "
+                f"({self.sides[1][1]}) cannot be installed together")
+
+
+def log_conflicts(lines: list[str]) -> list[Conflict]:
+    out: dict[str, Conflict] = {}
+    for ln in lines:
+        if (m := CONFLICT_RE.search(ln)) and (c := Conflict.parse(m)):
+            out.setdefault(c.label(), c)
+    return list(out.values())
+
+
 BUILD_ERROR_RE = re.compile(r"^(error(\[E\d+\])?: .*|test result: FAILED.*|thread '.*' panicked at .*"
                             r"|---- \S+ stdout ----|error: Bad exit status.*)$")
 
@@ -1780,6 +1815,11 @@ class CoprState:
                 req = MissingReq.parse(m.group(1) or m.group(2))
                 have = missing.setdefault(req.key(), req)
                 have.features += [f for f in req.features if f not in have.features]
+        conflicts = log_conflicts(text.splitlines())
+        if conflicts and not missing:
+            verdicts = [self.check_conflict(pkg, chroot, c, d) for c in conflicts]
+            d.verdict = max(verdicts, key=VERDICT_RANK.__getitem__)
+            return d
         if not missing:
             errors = list(dict.fromkeys(ln.strip() for ln in text.splitlines() if BUILD_ERROR_RE.match(ln.strip())))
             d.notes += [f"build error: {e}" for e in errors[:8]] or ["failed; no known error pattern in the log"]
@@ -1789,6 +1829,44 @@ class CoprState:
         verdicts = [self.check_missing(pkg, chroot, req, d) for req in missing.values()]
         d.verdict = max(verdicts, key=VERDICT_RANK.__getitem__)
         return d
+
+    def copr_has_package(self, name: str) -> bool:
+        try:
+            copr_api("package/", ownername=self.owner, projectname=self.name, packagename=name)
+            return True
+        except urllib.error.HTTPError:
+            return False
+
+    def check_conflict(self, pkg: LocalPackage, chroot: str, c: Conflict, d: ChrootDiag) -> str:
+        """Explain a version conflict in the build root; returns the verdict it implies."""
+        label = f"conflict: {c.label()}"
+        base = c.name.removesuffix("-devel").split("+")[0]  # rust-hashbrown
+        local = next((lp for lp in self.local.values() if base in (f"rust-{lp.crate}", lp.rpm_name)), None)
+        if not local or COPR_REPO not in (repo for _, repo in c.sides):
+            d.notes.append(f"{label}: both come from the target; the build needs two versions of it")
+            return "blocked"
+        if not local.compat:
+            d.notes.append(f"{label}: the build needs both versions, and the local {local.crate} package has the "
+                           f"same name as the target's. Make it a compat package: regen --compat {local.crate}, "
+                           f"srpm, delete the old one from COPR (copr-cli delete-package {self.project} "
+                           f"--name {base}), then copr --retry-failed")
+            return "blocked"
+        if self.copr_has_package(base):
+            d.notes.append(f"{label}: the local {local.crate} is now the compat package {local.rpm_name}, but "
+                           f"COPR still has {base}, which builds can pick; delete it (copr-cli delete-package "
+                           f"{self.project} --name {base}) and resubmit")
+            return "blocked"
+        dd = self.diagnose(local)
+        dc = dd.chroots.get(chroot)
+        if dc and dc.verdict == "ok":
+            d.notes.append(f"{label}: now {local.rpm_name}, built there; resubmit")
+            return "retry"
+        if dc and dc.verdict in ("active", "wait"):
+            d.notes.append(f"{label}: now {local.rpm_name}, still building there; wait")
+            return "wait"
+        d.notes.append(f"{label}: now {local.rpm_name}; submit it, then this")
+        d.via.add(local.crate)
+        return "retry"
 
     def check_missing(self, pkg: LocalPackage, chroot: str, req: MissingReq, d: ChrootDiag) -> str:
         """Explain one missing BuildRequires; returns the verdict it implies."""
@@ -1950,6 +2028,9 @@ def cmd_copr_log(args) -> None:
             info(ANSI_RE.sub("", ln))
         return
     missing, errors, warnings = summarize_log(text, pkg)
+    conflicts = log_conflicts([ANSI_RE.sub("", ln) for ln in text.splitlines()])
+    for c in conflicts:
+        info(f"   conflict: {c.label()}")
     for m in missing:
         info(f"   missing BuildRequires: {m}")
     for e in errors[:args.errors]:
@@ -1967,10 +2048,10 @@ def cmd_copr_log(args) -> None:
         if len(shown) < len(ws):
             info(f"   … and {len(ws) - len(shown)} more like it")
         info(f"      {'expected: ' + why if why else 'from the crate code; not a packaging problem unless the build fails'}")
-    if not (missing or errors or warnings):
+    if not (missing or errors or warnings or conflicts):
         info("   no errors or warnings")
-    if missing:
-        info(f"   see 'copr-status --project {args.project} {pkg.crate}' for what each missing one needs")
+    if missing or conflicts:
+        info(f"   see 'copr-status --project {args.project} {pkg.crate}' for what to do")
     elif errors and bc["state"] not in COPR_ACTIVE:
         closure = local_closure(pkg, args.chroot, state.local)
         info(f"   reproduce: rust-deps mock-chain -r {mock_chroot(args.chroot)} {' '.join(closure)}")
@@ -2076,8 +2157,9 @@ def report_target_check(plan: list[tuple[LocalPackage, list[str]]], local: dict[
             for ln in lines:
                 info(f"            {ln}")
         if shadows and not quiet:
-            info(f"   note: other versions of rust-{pkg.crate} are in {', '.join(shadows)}; in this project's "
-                 "builds there the local one is picked, so a build needing an older version too cannot resolve")
+            info(f"   note: {', '.join(shadows)} ship other versions of rust-{pkg.crate}, with the same package "
+                 "name: a build that needs both cannot install them together. If one does, make this a "
+                 f"compat package: regen --compat {pkg.crate}")
     if external:
         info("missing from a target and not in this tree:")
         for rel, reqs in sorted(external.items()):
