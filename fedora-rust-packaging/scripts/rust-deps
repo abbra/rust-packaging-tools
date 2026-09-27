@@ -3123,7 +3123,8 @@ def review_plan(pkgs: list[LocalPackage], root: Path, project: str | None, chroo
         for pkg in stage:
             have = ", ".join(rawhide.versions(pkg.crate)) or "no build yet"
             if (dg := pkg.dist_git) is not None:
-                source = f"adopted from dist-git {dg.get('branch')} {str(dg.get('commit', ''))[:10]}"
+                how = "marked from" if dg.get("packaging") == "local" else "adopted from"  # adopt --mark-only
+                source = f"{how} dist-git {dg.get('branch')} {str(dg.get('commit', ''))[:10]}"
                 if pkg.version in rawhide.versions(pkg.crate):
                     item = PlanItem(pkg, "skip", "", f"in Fedora ({source}); nothing to submit", [])
                 else:

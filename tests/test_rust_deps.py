@@ -417,6 +417,10 @@ def test_review_plan(tmp_path, monkeypatch):
     by = {i.pkg.crate: i for s in plan for i in s}
     assert (by["zmij"].kind, by["ciborium"].kind) == ("update", "skip")
     assert "Rawhide: 0.9.0" in by["zmij"].detail and "adopted from dist-git rawhide 2cccfd47b7" in by["zmij"].detail
+    (tmp_path / "zmij" / rd.DIST_GIT_FILE).write_text('package = "rust-zmij"\nbranch = "rawhide"\ncommit = "2cccfd47b7"\n'
+                                                      'packaging = "local"\n')
+    plan = rd.review_plan(list(local.values()), tmp_path, None, "fedora-rawhide-x86_64")
+    assert "marked from dist-git" in [i for s in plan for i in s if i.pkg.crate == "zmij"][0].detail
     assert (by["synta-derive"].state, by["synta-derive"].detail) == ("ready", str(draft))
     assert by["synta"].state == "not-ready" and by["synta"].after == ["rust-synta-derive", "rust-zmij"]
     assert by["synta-cbor"].state == "filed" and by["synta-cbor"].detail.endswith("/2600001")
