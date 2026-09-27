@@ -298,10 +298,21 @@ class LocalPackage:
     crate: str
     dir: Path
     version: str | None  # None until a spec has been generated
+    name: str | None = None  # RPM name, from the spec's file name; None until there is one
+
+    @property
+    def rpm_name(self) -> str:
+        return self.name or f"rust-{self.crate}"
+
+    @property
+    def compat(self) -> bool:
+        """A compat package (rust2rpm --compat): rust-<crate><major.minor>, installable next to
+        other versions of the crate."""
+        return self.rpm_name != f"rust-{self.crate}"
 
     @property
     def spec(self) -> Path:
-        return self.dir / f"rust-{self.crate}.spec"
+        return self.dir / f"{self.rpm_name}.spec"
 
     @property
     def crate_file(self) -> Path | None:
@@ -332,14 +343,18 @@ def local_packages(root: Path) -> dict[str, LocalPackage]:
     for d in sorted(p for p in root.iterdir() if p.is_dir()):
         if not (d / "rust2rpm.toml").exists():
             continue
-        crate, version = d.name, None
-        for spec in d.glob("rust-*.spec"):
+        crate, version, name = d.name, None, None
+        specs = sorted(d.glob("rust-*.spec"), key=lambda f: f.stat().st_mtime)
+        if len(specs) > 1:
+            warn(f"{d.name}: several specs ({', '.join(f.name for f in specs)}); using the newest")
+        for spec in specs[-1:]:
             text = spec.read_text()
+            name = spec.stem
             if m := re.search(r"^%global crate\s+(\S+)", text, re.M):
                 crate = m.group(1)
             if m := re.search(r"^Version:\s+(\S+)", text, re.M):
                 version = m.group(1)
-        pkgs[crate] = LocalPackage(crate, d, version)
+        pkgs[crate] = LocalPackage(crate, d, version, name)
     return pkgs
 
 
@@ -980,7 +995,7 @@ def cmd_init(args) -> None:
         if host and host.best(name, f"={version}"):
             add_target(d, args.target)
         pkg = LocalPackage(name, d, None)
-        if regen(pkg, version):
+        if regen(pkg, version, compat=args.compat):
             created.append(pkg)
         else:
             failed.append(name)
@@ -995,8 +1010,13 @@ def cmd_init(args) -> None:
 
 # ─── regen ───────────────────────────────────────────────────────────────────
 
-def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = None) -> bool:
-    """Regenerate spec + patches with rust2rpm; returns False on failure."""
+def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = None,
+          compat: bool | None = None) -> bool:
+    """Regenerate spec + patches with rust2rpm; returns False on failure.
+
+    compat: True makes it a compat package, False a regular one, None keeps what it is.
+    """
+    compat = pkg.compat if compat is None else compat
     edits = load_edits(pkg.edits_file)
     if local_crate:
         # rust2rpm --path does not store the crate; trial and srpm need it here
@@ -1022,7 +1042,7 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         if manual.exists() and not cfg.get("package", {}).get("cargo-toml-patch-comments"):
             action(f"{pkg.crate}: {manual.name} is applied, but {EDITS_FILE} is empty and rust2rpm.toml has "
                    "no cargo-toml-patch-comments; if it is left from earlier edits, delete it and regen")
-    cmd = ["rust2rpm", *mode, "-s", "--no-existence-check", *target]
+    cmd = ["rust2rpm", *mode, "-s", "--no-existence-check", *(["--compat"] if compat else []), *target]
     info(f"   rust2rpm {' '.join(cmd[1:])}")
     res = run(cmd, cwd=pkg.dir, env=env, capture_output=True)
     out = res.stdout + res.stderr
@@ -1038,6 +1058,18 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         action(f"{pkg.crate}: generated Summary is too long; set package.summary in rust2rpm.toml and regen")
     if edits and not manual.exists():
         warn(f"{pkg.crate}: {EDITS_FILE} produced no changes to Cargo.toml")
+    specs = sorted(pkg.dir.glob("rust-*.spec"), key=lambda f: f.stat().st_mtime)
+    for old in specs[:-1]:  # e.g. the regular spec after --compat, or rust-foo0.1 after an update
+        info(f"   removing {old.name} (now {specs[-1].name})")
+        old.unlink()
+        for srpm in pkg.dir.glob(f"{old.stem}-[0-9]*.src.rpm"):
+            srpm.unlink()
+        # mock-chain's local repository would still offer the old package to later builds
+        for built in (CACHE_DIR / "mock-repo" / "results").glob(f"*/{old.stem}-[0-9]*"):
+            info(f"   removing {built} from the mock-chain repository")
+            shutil.rmtree(built)
+            if (built.parent / "repodata").exists() and shutil.which("createrepo_c"):
+                run(["createrepo_c", "-q", "--update", str(built.parent)])
     new = local_packages(pkg.dir.parent).get(pkg.crate)
     if new and new.version:
         for old in pkg.dir.glob(f"{pkg.crate}-*.crate"):
@@ -1047,7 +1079,7 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         if new.crate_file.exists() and not (requires.get("build") or requires.get("lib")):
             if hint := sys_hint(tomllib.loads(read_crate_member(new.crate_file, "Cargo.toml"))):
                 action(f"{pkg.crate}: {hint}")
-        if compiled := compiled_doc_files(new.crate_file, pkg.spec):
+        if compiled := compiled_doc_files(new.crate_file, new.spec):
             action(f"{pkg.crate}: {', '.join(compiled)} marked %doc but compiled into the crate (include_str!); "
                    "the package must work without its documentation, so add to [package] in rust2rpm.toml: "
                    f"doc-files.exclude = {json.dumps(compiled)}, with a comment saying why")
@@ -1074,7 +1106,7 @@ def cmd_regen(args) -> None:
             info(f"== {pkg.crate} from {args.crate_file}")
         else:
             info(f"== {pkg.crate} {version or '(latest)'}")
-        if not regen(pkg, version, args.crate_file.resolve() if args.crate_file else None):
+        if not regen(pkg, version, args.crate_file.resolve() if args.crate_file else None, args.compat):
             failed.append(pkg.crate)
     if failed:
         die(f"regen failed for: {', '.join(failed)}")
@@ -1319,7 +1351,7 @@ def cmd_srpm(args) -> None:
             failed.append(pkg.crate)
             print(res.stdout + res.stderr, file=sys.stderr)
             continue
-        for old in pkg.dir.glob(f"rust-{pkg.crate}-*.src.rpm"):
+        for old in pkg.dir.glob(f"{pkg.rpm_name}-[0-9]*.src.rpm"):
             old.unlink()
         res = run(["rpmbuild", "-bs", "--define", f"_sourcedir {pkg.dir}", "--define", f"_srcrpmdir {pkg.dir}",
                    str(pkg.spec)], capture_output=True)
@@ -1388,7 +1420,7 @@ def cmd_order(args) -> None:
 
 
 def srpm_of(pkg: LocalPackage) -> Path:
-    found = sorted(pkg.dir.glob(f"rust-{pkg.crate}-{pkg.version}-*.src.rpm"))
+    found = sorted(pkg.dir.glob(f"{pkg.rpm_name}-{pkg.version}-*.src.rpm"))
     if not found:
         die(f"{pkg.crate}: no SRPM for {pkg.version}; run 'rust-deps srpm {pkg.crate}'")
     return found[-1]
@@ -1686,7 +1718,7 @@ class CoprState:
         """Builds of this version, newest first."""
         try:
             items = copr_api("build/list/", ownername=self.owner, projectname=self.name,
-                             packagename=f"rust-{pkg.crate}", limit=100)["items"]
+                             packagename=pkg.rpm_name, limit=100)["items"]
         except urllib.error.HTTPError:
             items = []
         f = copr_builds_file(self.project, pkg.crate)
@@ -1697,9 +1729,12 @@ class CoprState:
                     items.append(copr_api(f"build/{bid}"))
                 except urllib.error.HTTPError:
                     pass  # deleted
-        return [b for b in sorted(items, key=lambda b: b["id"], reverse=True)
-                if (b.get("source_package") or {}).get("version") == evr
-                or ((b.get("source_package") or {}).get("version") is None and b["state"] in COPR_ACTIVE)]
+        def ours(b: dict) -> bool:  # this version of this package (a compat package has its own name)
+            src = b.get("source_package") or {}
+            if src.get("version") is None:  # not imported yet
+                return b["state"] in COPR_ACTIVE
+            return src.get("version") == evr and src.get("name") in (None, pkg.rpm_name)
+        return [b for b in sorted(items, key=lambda b: b["id"], reverse=True) if ours(b)]
 
     def diagnose(self, pkg: LocalPackage) -> PackageDiag:
         if pkg.crate in self._diag:
@@ -2002,7 +2037,7 @@ def check_target(pkg: LocalPackage, chroot: str, local: dict[str, LocalPackage],
         elif dep:
             why += f"; the local package is {dep.version or 'not generated'}"
         problems.append(TargetProblem(req, why, True))
-    if idx.versions(pkg.crate) and pkg.version not in idx.versions(pkg.crate):
+    if not pkg.compat and idx.versions(pkg.crate) and pkg.version not in idx.versions(pkg.crate):
         notes.append(f"{rel} ({', '.join(idx.versions(pkg.crate))})")
     return problems, notes
 
@@ -2247,12 +2282,12 @@ def review_one(pkg: LocalPackage, chroot: str, results: Path, closure: set[str],
     work.mkdir(parents=True)
     shutil.copy2(pkg.spec, work)
     shutil.copy2(srpm_of(pkg), work)
-    cmd = ["fedora-review", "-n", f"rust-{pkg.crate}", "-m", str(chroot), "-B", "-o", REVIEW_MOCK_OPTS]
+    cmd = ["fedora-review", "-n", pkg.rpm_name, "-m", str(chroot), "-B", "-o", REVIEW_MOCK_OPTS]
     if closure:
         depdir = work / "deps"
         depdir.mkdir()
         for d in sorted(closure):
-            built = sorted(results.glob(f"rust-{d}-{local[d].version}-*"))
+            built = sorted(results.glob(f"{local[d].rpm_name}-{local[d].version}-*"))
             rpms = [r for r in (built[-1].glob("*.rpm") if built else []) if not r.name.endswith(".src.rpm")]
             if not rpms:
                 action(f"{pkg.crate}: no RPMs of local dependency {d} {local[d].version} in {results}; "
@@ -2268,7 +2303,7 @@ def review_one(pkg: LocalPackage, chroot: str, results: Path, closure: set[str],
         capture_output=True)
     res = run(cmd, cwd=work, capture_output=True)
     (work / "fedora-review.out").write_text(res.stdout + res.stderr)
-    report = work / f"review-rust-{pkg.crate}"
+    report = work / f"review-{pkg.rpm_name}"
     if not (report / "review.json").exists():
         info(f"   FAILED  fedora-review did not produce a report (see {work / 'fedora-review.out'})")
         for ln in (res.stdout + res.stderr).strip().splitlines()[-5:]:
@@ -2344,7 +2379,7 @@ def request_state(pkg: LocalPackage) -> dict:
 def copr_review_urls(pkg: LocalPackage, project: str, chroot: str) -> tuple[dict | None, str | None]:
     """Spec/SRPM URLs of the latest succeeded COPR build of the local version, or (None, problem)."""
     owner, _, name = project.partition("/")
-    rpm_name = f"rust-{pkg.crate}"
+    rpm_name = pkg.rpm_name
     query = urllib.parse.urlencode({"ownername": owner, "projectname": name, "packagename": rpm_name,
                                     "with_latest_succeeded_build": "true"})
     try:
@@ -2378,7 +2413,7 @@ def copr_review_urls(pkg: LocalPackage, project: str, chroot: str) -> tuple[dict
 
 def local_review_problem(pkg: LocalPackage) -> str | None:
     """None if 'review' passed for the current SRPM, else what is wrong."""
-    reports = sorted((CACHE_DIR / "review").glob(f"*/{pkg.crate}/review-rust-{pkg.crate}/review.json"),
+    reports = sorted((CACHE_DIR / "review").glob(f"*/{pkg.crate}/review-{pkg.rpm_name}/review.json"),
                      key=lambda f: f.stat().st_mtime)
     if not reports:
         return "no local fedora-review result; run 'review' first"
@@ -2402,7 +2437,7 @@ def koji_task_url(pkg: LocalPackage, task: str) -> tuple[str | None, str | None]
     if not info_:
         return None, f"Koji task {m.group(1)} does not exist"
     srpm = str(info_["request"][0]).rsplit("/", 1)[-1] if info_.get("request") else ""
-    nvr = f"rust-{pkg.crate}-{spec_query(pkg.spec, '%{version}-%{release}')}"
+    nvr = f"{pkg.rpm_name}-{spec_query(pkg.spec, '%{version}-%{release}')}"
     if info_["method"] != "build" or not srpm.startswith(nvr + "."):
         return None, f"Koji task {m.group(1)} is not a build of {nvr} ({info_['method']} {srpm})"
     if info_["state"] != 2:  # 2 = CLOSED (succeeded)
@@ -2430,7 +2465,7 @@ def review_request_text(pkg: LocalPackage, urls: dict, fas: str) -> tuple[str, s
     summary = spec_query(pkg.spec, "%{summary}").strip()
     description = spec_query(pkg.spec, "%{description}").strip()
     upstream = spec_query(pkg.spec, "%{url}").strip()
-    title = f"Review Request: rust-{pkg.crate} - {summary}"
+    title = f"Review Request: {pkg.rpm_name} - {summary}"
     body = (f"Spec URL: {urls['spec_url']}\n"
             f"SRPM URL: {urls['srpm_url']}\n"
             f"Upstream URL: {upstream}\n\n"
@@ -2472,7 +2507,7 @@ def cmd_review_request(args) -> None:
         koji_tasks[crate] = task
     failed = []
     for pkg in pkgs:
-        info(f"== review request rust-{pkg.crate} {pkg.version}")
+        info(f"== review request {pkg.rpm_name} {pkg.version}")
         problem = local_review_problem(pkg)
         urls = None
         if not problem:
@@ -2492,7 +2527,7 @@ def cmd_review_request(args) -> None:
             if bug:
                 depends.append(bug)
             elif args.file:
-                action(f"{pkg.crate}: depends on rust-{d}, which has no review request yet; file that first")
+                action(f"{pkg.crate}: depends on {local[d].rpm_name}, which has no review request yet; file that first")
         if args.file and len(depends) < len(deps.get(pkg.crate, ())):
             failed.append(pkg.crate)
             continue
@@ -2553,9 +2588,9 @@ def bz_rest(path: str) -> dict:
     return json.loads(_get(f"https://{BUGZILLA_HOST}/rest/{path}"))
 
 
-def find_review_bug(crate: str) -> dict | None:
-    """The open or newest review ticket of rust-<crate>, searched by summary."""
-    title = f"Review Request: rust-{crate} - "
+def find_review_bug(rpm_name: str) -> dict | None:
+    """The open or newest review ticket of a package, searched by summary."""
+    title = f"Review Request: {rpm_name} - "
     query = urllib.parse.urlencode({"product": "Fedora", "component": "Package Review",
                                     "summary": title, "include_fields": BUG_FIELDS})
     bugs = [b for b in bz_rest(f"bug?{query}")["bugs"] if b["summary"].startswith(title)]
@@ -2572,11 +2607,11 @@ def review_flag(bug: dict) -> tuple[str, str]:
 
 def review_status_one(pkg: LocalPackage, state: dict, record: bool, show: int) -> tuple[str, int | None]:
     """Find the review ticket of a local package, print its state; return the next step."""
-    rpm_name = f"rust-{pkg.crate}"
+    rpm_name = pkg.rpm_name
     if state.get("bug"):
         bug = bz_rest(f"bug/{state['bug']}?include_fields={BUG_FIELDS}")["bugs"][0]
     else:
-        bug = find_review_bug(pkg.crate)
+        bug = find_review_bug(pkg.rpm_name)
         if not bug:
             info(f"== {rpm_name}: no review ticket")
             return "file one with 'review-request --file'", None
@@ -2814,7 +2849,7 @@ def cmd_review_status(args) -> None:
     for pkg in pkgs:
         nxt, bug_id = review_status_one(pkg, request_state(pkg), args.record, args.comments)
         info(f"   next: {nxt}")
-        summary.append((f"rust-{pkg.crate}", link(bug_url(bug_id), str(bug_id)) if bug_id else "-", nxt))
+        summary.append((pkg.rpm_name, link(bug_url(bug_id), str(bug_id)) if bug_id else "-", nxt))
     if len(summary) > 1:
         info("\nsummary:")
         w1 = max(len(n) for n, *_ in summary)
@@ -2830,7 +2865,7 @@ def cmd_status(args) -> None:
     rows = [("crate", "packaged", "crates.io", "fedora", "patch", "srpm")]
     for pkg in select(args.root, args.crates, args.all or not args.crates):
         latest = pick_version(pkg.crate)
-        srpm = list(pkg.dir.glob(f"rust-{pkg.crate}-{pkg.version}-*.src.rpm"))
+        srpm = list(pkg.dir.glob(f"{pkg.rpm_name}-{pkg.version}-*.src.rpm"))
         rows.append((
             pkg.crate,
             pkg.version or "-",
@@ -2916,6 +2951,9 @@ def main() -> None:
     sp.add_argument("--force", action="store_true", help="re-initialize existing packages (overwrites config)")
     sp.add_argument("--no-trial", action="store_true", help="skip the test discovery run")
     sp.add_argument("--apply-tests", action="store_true", help="write the suggested [tests] table")
+    sp.add_argument("--compat", action="store_true",
+                    help="create compat packages (rust-<crate><major.minor>), installable next to another "
+                         "version of the crate")
     sp.add_argument("-r", "--chroot", dest="target", metavar="CHROOT",
                     help="check against the crate repositories of this COPR/mock chroot "
                          "(e.g. fedora-44-x86_64, rhel+epel-10-x86_64) instead of the host's")
@@ -2929,6 +2967,10 @@ def main() -> None:
     g.add_argument("--version", help="package this version")
     g.add_argument("--crate-file", type=Path, metavar="PATH",
                    help="generate from a local .crate (e.g. 'cargo package' output of an unreleased version)")
+    g = sp.add_mutually_exclusive_group()
+    g.add_argument("--compat", action="store_true", default=None,
+                   help="make it a compat package (rust-<crate><major.minor>); kept on later regens")
+    g.add_argument("--no-compat", dest="compat", action="store_false", help="make it a regular package again")
     sp.set_defaults(func=cmd_regen)
 
     sp = sub.add_parser("trial", help="cargo test the patched crate like %%check would")

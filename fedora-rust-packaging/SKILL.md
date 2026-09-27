@@ -4,7 +4,7 @@ description: Package Rust crates for Fedora with rust2rpm, including every depen
 compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
 argument-hint: "<crate>[@ver]… | --manifest <Cargo.toml> | <rust-deps command> [args] [--root <dir>]"
 metadata:
-  version: "1.11"
+  version: "1.12"
 ---
 
 # Fedora Rust crate packaging
@@ -92,7 +92,8 @@ Read them as follows (forms can be combined with `--root <dir>`):
   - deleting existing packages
 - **Public actions need the user's explicit approval each time:** creating a
   COPR project, submitting COPR builds (`copr` without `-n`, including
-  `--retry-failed`), changing COPR chroot settings, Koji scratch builds, and
+  `--retry-failed`), changing COPR chroot settings, deleting COPR packages or
+  builds, Koji scratch builds, and
   anything in
   Bugzilla (`review-request --file`, which files tickets or posts comments
   under the user's name). Show the plan or the drafts first; never pass
@@ -169,7 +170,9 @@ Read them as follows (forms can be combined with `--root <dir>`):
        (`resolve -r <chroot>`, `init --recursive -r <chroot>`; `init` writes
        `targets.toml` so `copr` builds a crate Fedora already ships only in the
        chroots that lack it), or leave the target out for those packages. For
-       an UPDATE on the target, ask: plain newer package or compat package.
+       an UPDATE on the target, ask: plain newer package or compat package
+       (`init --compat`). A plain one fails any build that also needs the
+       target's version.
        Never drop a required dependency to make a target build. `init` drops
        optional features whose crates the target lacks; if a consumer needs
        such a feature (e.g. `strum/derive`), package that crate as well and
