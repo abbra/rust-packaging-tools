@@ -537,6 +537,7 @@ def test_prepare_update_uses_the_adopted_branch(tmp_path, monkeypatch):
     monkeypatch.setattr(rd, "update_files", lambda pkg: ({}, []))
     pkg = rd.local_packages(root)["zmij"]
     # f45 is where it was adopted, and it did not move (rawhide did)
-    assert rd.prepare_update(pkg, top, None, False) is False  # no files to change: nothing to commit
-    assert not any("moved since" in a for a in actions)
+    assert rd.prepare_update(pkg, top, None, False) is True  # no files to change: nothing to commit
+    assert actions == []
+    assert not (d / rd.UPDATE_STATE).exists()
     assert sh("git", "rev-parse", "HEAD", cwd=top / "rust-zmij") == adopted

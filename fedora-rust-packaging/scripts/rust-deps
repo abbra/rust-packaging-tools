@@ -3422,11 +3422,16 @@ def prepare_update(pkg: LocalPackage, top: Path, branch: str | None, dry_run: bo
         shutil.copy2(src, checkout / rel)
     for f in lookaside:
         shutil.copy2(f, checkout / f.name)
-    res = run(["fedpkg", "new-sources", "--offline", *(f.name for f in lookaside)], cwd=checkout, capture_output=True)
-    if res.returncode:
-        action(f"{pkg.crate}: fedpkg new-sources --offline failed:\n{res.stdout}{res.stderr}")
-        return False
-    git(checkout, "add", *repo, "sources", ".gitignore")
+    if lookaside:
+        if not shutil.which("fedpkg"):
+            action(f"{pkg.crate}: fedpkg is needed to record the sources in dist-git: dnf install fedpkg")
+            return False
+        res = run(["fedpkg", "new-sources", "--offline", *(f.name for f in lookaside)], cwd=checkout,
+                  capture_output=True)
+        if res.returncode:
+            action(f"{pkg.crate}: fedpkg new-sources --offline failed:\n{res.stdout}{res.stderr}")
+            return False
+    git(checkout, "add", *repo, *(f for f in ("sources", ".gitignore") if (checkout / f).exists()))
     added = [rel for rel in repo if rel not in tracked]
     if not git(checkout, "diff", "--cached", "--quiet", check=False).returncode:
         info(f"   {checkout}: no changes against dist-git {branch}")
@@ -3448,6 +3453,9 @@ def push_update(pkg: LocalPackage) -> bool:
     f = pkg.dir / UPDATE_STATE
     if not f.exists():
         action(f"{pkg.crate}: nothing prepared; run 'dist-git {pkg.crate}' first")
+        return False
+    if not shutil.which("fedpkg"):
+        action(f"{pkg.crate}: fedpkg is needed to fork and upload the sources: dnf install fedpkg")
         return False
     state = json.loads(f.read_text())
     checkout = Path(state["checkout"])
