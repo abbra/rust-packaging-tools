@@ -1601,6 +1601,12 @@ def target_index(chroot: str, refresh: bool = False) -> FedoraIndex:
     return _TARGET_INDEX[rel]
 
 
+def mock_chroot(chroot: str) -> str:
+    """A mock config to reproduce a COPR chroot locally: RHEL needs a
+    subscription, CentOS Stream is the closest (its EPEL is epel-N, not epel-z-N)."""
+    return "centos-stream+" + chroot[5:] if chroot.startswith("rhel+") else chroot
+
+
 @dataclass
 class MissingReq:
     text: str                  # as dnf printed it
@@ -1815,6 +1821,140 @@ class CoprState:
             path.write_bytes(data)
             return path
         return None
+
+
+# ─── COPR build logs ─────────────────────────────────────────────────────────
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+WARNING_RE = re.compile(r"^warning: (.+)$")
+WARNING_SUMMARY_RE = re.compile(r"^`[^`]+` \(.*\) generated \d+ warnings?|^\d+ warnings? emitted")
+
+
+def explain_warning(msg: str, pkg: LocalPackage) -> str | None:
+    """Why a warning in a COPR build log is expected, or None if it is not known."""
+    if m := re.match(r"unexpected `cfg` condition value: `([^`]+)`", msg):
+        dropped = load_edits(pkg.edits_file).get("drop-features", [])
+        if m.group(1) in dropped:
+            return (f"{EDITS_FILE} drops feature '{m.group(1)}', but the code still has "
+                    f"#[cfg(feature = \"{m.group(1)}\")]; that code is compiled out, as with the feature "
+                    "off. Keep the drop: an empty feature would give a -devel subpackage that cannot build")
+        return "the code tests a cfg value its Cargo.toml does not declare; an upstream lint, harmless"
+    if re.match(r"unexpected `cfg` condition name: `(docsrs|docsrs_\w+|nightly|coverage\w*|fuzzing|loom)`", msg):
+        return "a cfg for docs.rs, nightly or test tooling; never set in Fedora builds"
+    if msg.startswith("File listed twice: /usr/share/cargo/registry/"):
+        return ("rust2rpm lists %doc/%license files inside %{crate_instdir}/, which %files also owns "
+                "whole; standard for Rust packages")
+    if "/etc/hosts created as /etc/hosts.rpmnew" in msg:
+        return "mock's buildroot setup, not the package"
+    if msg.startswith("no (git) VCS found"):
+        return "cargo reads the crate outside a git checkout; harmless"
+    return None
+
+
+def summarize_log(text: str, pkg: LocalPackage) -> tuple[list[str], list[str], list[tuple[str, int, list[str], str | None]]]:
+    """(missing BuildRequires, build errors, [(warning, count, locations, explanation)])."""
+    lines = [ANSI_RE.sub("", ln) for ln in text.splitlines()]
+    missing = list(dict.fromkeys(MissingReq.parse(m.group(1) or m.group(2)).label()
+                                 for ln in lines if (m := MISSING_RE.search(ln))))
+    errors = list(dict.fromkeys(ln.strip() for ln in lines if BUILD_ERROR_RE.match(ln.strip())))
+    warnings: dict[str, tuple[int, list[str]]] = {}
+    for i, ln in enumerate(lines):
+        m = WARNING_RE.match(ln.strip())
+        if not m or WARNING_SUMMARY_RE.match(m.group(1)):
+            continue
+        count, locs = warnings.get(m.group(1), (0, []))
+        loc = next((x.split("-->", 1)[1].strip() for x in lines[i + 1:i + 4] if "-->" in x), None)
+        warnings[m.group(1)] = (count + 1, locs + ([loc] if loc and loc not in locs else []))
+    return missing, errors, [(w, c, locs, explain_warning(w, pkg)) for w, (c, locs) in warnings.items()]
+
+
+def fetch_copr_log(build_id: int, chroot: str, result_url: str, active: bool) -> Path | None:
+    """A chroot's build log; a running build's live log is fetched again every time."""
+    if not active:
+        return CoprState.fetch_log(build_id, chroot, result_url)
+    try:
+        data = _get(result_url.rstrip("/") + "/builder-live.log")
+    except (urllib.error.URLError, OSError):
+        return None
+    if data[:2] == b"\x1f\x8b":  # served compressed
+        data = gzip.decompress(data)
+    path = CACHE_DIR / "copr-logs" / f"{build_id}-{chroot}.live.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def cmd_copr_log(args) -> None:
+    pkg = select(args.root, [args.crate], False)[0]
+    state = CoprState(args.project, args.root)
+    evr = spec_query(pkg.spec, "%{version}-%{release}")
+    for build in state.builds(pkg, evr):
+        bc = next((c for c in copr_api("build-chroot/list/", build_id=build["id"])["items"]
+                   if c["name"] == args.chroot), None)
+        if bc:
+            break
+    else:
+        die(f"no COPR build of {pkg.crate} {evr} in {args.chroot}")
+    blink = link(copr_build_url(build["id"]), str(build["id"]))
+    info(f"{pkg.crate} {evr}, build {blink}, {args.chroot}: {bc['state']}")
+    if not bc.get("result_url"):
+        die("no log yet: the build has not started")
+    path = fetch_copr_log(build["id"], args.chroot, bc["result_url"], bc["state"] in COPR_ACTIVE)
+    if not path:
+        die(f"cannot download the log from {bc['result_url']}")
+    info(f"log: {path}")
+    text = path.read_text(errors="replace")
+    if args.grep:
+        rx = re.compile(args.grep)
+        for i, ln in enumerate(text.splitlines(), 1):
+            if rx.search(ANSI_RE.sub("", ln)):
+                info(f"{i:6}: {ANSI_RE.sub('', ln)}")
+        return
+    if args.tail:
+        for ln in text.splitlines()[-args.tail:]:
+            info(ANSI_RE.sub("", ln))
+        return
+    missing, errors, warnings = summarize_log(text, pkg)
+    for m in missing:
+        info(f"   missing BuildRequires: {m}")
+    for e in errors[:args.errors]:
+        info(f"   error: {e}")
+    if len(errors) > args.errors:
+        info(f"   … {len(errors) - args.errors} more error line(s); see --grep")
+    by_reason: dict[str | None, list] = {}
+    for w in warnings:
+        by_reason.setdefault(w[3], []).append(w)
+    for why, ws in sorted(by_reason.items(), key=lambda kv: kv[0] is None):
+        shown = ws if why is None or len(ws) <= 2 else ws[:1]
+        for w, count, locs, _ in shown:
+            where = f" ({', '.join(locs[:3])}{', …' if len(locs) > 3 else ''})" if locs else ""
+            info(f"   warning ×{count}: {w}{where}")
+        if len(shown) < len(ws):
+            info(f"   … and {len(ws) - len(shown)} more like it")
+        info(f"      {'expected: ' + why if why else 'from the crate code; not a packaging problem unless the build fails'}")
+    if not (missing or errors or warnings):
+        info("   no errors or warnings")
+    if missing:
+        info(f"   see 'copr-status --project {args.project} {pkg.crate}' for what each missing one needs")
+    elif errors and bc["state"] not in COPR_ACTIVE:
+        closure = local_closure(pkg, args.chroot, state.local)
+        info(f"   reproduce: rust-deps mock-chain -r {mock_chroot(args.chroot)} {' '.join(closure)}")
+
+
+def local_closure(pkg: LocalPackage, chroot: str, local: dict[str, LocalPackage]) -> list[str]:
+    """The package and the local packages it needs in that chroot, dependencies first."""
+    order, seen = [], set()
+
+    def visit(p: LocalPackage) -> None:
+        if p.crate in seen:
+            return
+        seen.add(p.crate)
+        for d in sorted(dep_kinds(p)):
+            if d in local and d != p.crate and local[d].version and local[d].builds_in(chroot):
+                visit(local[d])
+        order.append(p.crate)
+    visit(pkg)
+    return order
 
 
 # ─── target check (before submitting) ────────────────────────────────────────
@@ -2811,6 +2951,15 @@ def main() -> None:
                     help="resubmit only the chroots whose failure can succeed now (see copr-status), "
                          "and packages with no build of their current version")
     sp.set_defaults(func=cmd_copr)
+
+    sp = sub.add_parser("copr-log", help="fetch and summarize a COPR build log: errors, explained warnings")
+    sp.add_argument("crate")
+    sp.add_argument("-r", "--chroot", required=True, help="COPR chroot, e.g. rhel+epel-10-x86_64")
+    sp.add_argument("--project", required=True, help="COPR project, e.g. user/project")
+    sp.add_argument("--grep", metavar="REGEX", help="print matching log lines instead of the summary")
+    sp.add_argument("--tail", type=int, metavar="N", help="print the last N lines instead of the summary")
+    sp.add_argument("--errors", type=int, default=15, metavar="N", help="error lines to show (default %(default)s)")
+    sp.set_defaults(func=cmd_copr_log)
 
     sp = sub.add_parser("check-targets",
                         help="check that every BuildRequires resolves in each target chroot (before 'copr')")

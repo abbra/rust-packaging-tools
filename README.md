@@ -89,6 +89,7 @@ rust-deps review --all -r fedora-45-x86_64      # fedora-review, before submitti
 rust-deps check-targets --all --project username/repo   # will every chroot find its BuildRequires?
 rust-deps copr --all --project username/repo -r fedora-rawhide-x86_64 --wait
 rust-deps copr-status --all --project username/repo   # why builds failed, per chroot
+rust-deps copr-log jsonschema -r fedora-44-x86_64 --project username/repo   # errors, explained warnings
 rust-deps copr --retry-failed --all --project username/repo   # resubmit what can succeed now
 rust-deps resolve -r rhel+epel-10-x86_64 jsonschema     # check against another target
 rust-deps review-request --all --project username/repo --fas username   # drafts; --file files them

@@ -130,6 +130,7 @@ hold:
 | `copr CRATE…\|--all --project P [-r CHROOT]… [-n] [--wait] [--retry-failed] [--force]` | Submit to COPR. First runs `check-targets` on what it would submit and stops if a BuildRequires would not resolve, unless `--force`. The builds of a stage form one COPR batch (`--with-build-id`), which starts after the previous stage's batch has finished (`--after-build-id`). With `--wait`, watch the builds until they finish and fail if any failed. With `--retry-failed`, submit only what `copr-status` marks `RETRY` (limited to the `-r` chroots, if given), plus packages that have no build of their current version yet. See "COPR build failures". |
 | `check-targets CRATE…\|--all (-r CHROOT…\|--project P) [-q] [--refresh]` | Read-only; no COPR build needed. For each package and target release (the `-r` chroots, or all chroots of the COPR project; `targets.toml` respected), generate the BuildRequires as rust2rpm does (`cargo2rpm buildrequires` with the spec's feature flags, dev-dependencies unless `%check` is off) and check each: a local package built for that target, with the version and the features asked for, or the target's repositories. Notes where a local package shadows other versions the target ships. Fails if anything would not resolve. See "COPR build failures". |
 | `copr-status CRATE…\|--all --project P [-r CHROOT]… [--json] [--refresh]` | Read-only. For the latest COPR build of each package's current version, show every chroot's result, and for each failure the reason from the build log: each missing BuildRequires, checked against the local packages and their builds and against the target's repositories, or the compile and test errors. Ends with the next steps. Logs are cached in `~/.cache/rust-packaging-tools/copr-logs/`. See "COPR build failures". |
+| `copr-log CRATE -r CHROOT --project P [--grep RE \| --tail N] [--errors N]` | Read-only. Fetch the log of the newest build of the package's current version in that chroot (a running build's live log too) and summarize it: missing BuildRequires, error lines, and warnings grouped, each known one explained (see "Reading a build log"). `--grep` and `--tail` print log lines instead. |
 | `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
 | `review-request CRATE…\|--all --project P --fas NAME [-r CHROOT] [--needs-sponsor] [--comment TEXT] [--koji-task CRATE=TASK]… [--file]` | Prepare the Bugzilla review request of each package, in dependency order, from its latest succeeded COPR build (chroot default `fedora-rawhide-x86_64`). Requires a passing `review` of the current SRPM and a published spec identical to the local one. Writes `review-request.txt`. `--koji-task` adds a link to a successful Koji scratch build of that crate's SRPM (checked through Koji). With `--file`, files it (or, if already filed, posts the new Spec/SRPM URLs) and records the bug in `review-request.json`. See "Submitting to Fedora". |
 | `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
@@ -427,14 +428,30 @@ Then:
      tests.
 3. **`BLOCKED` by a local dependency** that failed there: handle that
    dependency first; `copr-status` shows its own reason.
-4. **`FAILED`:** read the log it names (the full log is cached locally), and
-   reproduce it with `$T mock-chain -r <chroot> <crate>…`. Mock ships configs
+4. **`FAILED`:** summarize the log with `$T copr-log <crate> -r <chroot> --project P`
+   (the full log is cached locally), and reproduce it with
+   `$T mock-chain -r <chroot> <crate>…`. Mock ships configs
    for most COPR chroots (`fedora-44-x86_64`, `rhel+epel-10-x86_64`; RHEL
    needs a subscription, `centos-stream+epel-10-x86_64` is close). Fix,
    `regen`, `srpm`, then submit the package and the packages that need it with
    `copr -r <chroot>…`.
 
 Run `copr-status` again after each round until every chroot you need is `ok`.
+
+### Reading a build log
+
+`$T copr-log <crate> -r <chroot> --project P` summarizes a log; it works on
+running builds too. Warnings do not fail a build. Those it knows:
+
+| warning | why it is expected |
+|---|---|
+| ``unexpected `cfg` condition value: `F` `` where `cargo-toml-edits.toml` drops feature `F` | The code keeps `#[cfg(feature = "F")]`, which is now never set, so that code is compiled out, as with the feature off. Keep the drop: an empty feature `F = []` would make rust2rpm generate a `+F-devel` subpackage that cannot build. |
+| ``unexpected `cfg` condition value`` (other) or ``condition name: `docsrs` `` | Upstream lints about cfgs for docs.rs, nightly or test tooling. |
+| `File listed twice: /usr/share/cargo/registry/…` | rust2rpm lists `%doc`/`%license` files inside the crate directory, which `%files` also owns whole. |
+| `/etc/hosts created as /etc/hosts.rpmnew`, `no (git) VCS found` | mock's buildroot setup; cargo outside a git checkout. |
+
+Other warnings come from the crate's code and matter only if they turn into
+errors.
 
 Targets and the repositories `-r CHROOT` queries (the ones that ship crates;
 RHEL and CentOS ship none):
