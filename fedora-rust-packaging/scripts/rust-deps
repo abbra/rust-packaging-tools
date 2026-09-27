@@ -1479,6 +1479,12 @@ def cmd_copr(args) -> None:
     else:
         plan = [[(p, args.chroot) for p in s] for s in stages]
     plan = limit_to_targets(plan, args.project)
+    if not args.force:
+        pairs = [(p, cs or project_chroots(args.project)) for s in plan for p, cs in s]
+        if n := report_target_check(pairs, local_packages(args.root), quiet=True):
+            die(f"{n} BuildRequires would not resolve in the chroots above; those builds would fail. "
+                "Fix them (see 'COPR build failures' in the manual), leave those chroots out with -r, "
+                "or pass --force to submit anyway")
     ids = copr_submit(plan, args.project, args.dry_run)
     if args.wait and not args.dry_run:
         info("waiting for the builds to finish")
@@ -1516,6 +1522,83 @@ def record_copr_build(project: str, crate: str, build_id: int) -> None:
 
 def copr_api(path: str, **params) -> dict:
     return json.loads(_get(f"{COPR_URL}/api_3/{path}?{urllib.parse.urlencode(params)}"))
+
+
+_BUILD_INFO: dict[tuple[str, str | None], tuple[dict, list[str]]] = {}
+
+
+def build_info(pkg: LocalPackage) -> tuple[dict, list[str]]:
+    """The patched Cargo.toml and the BuildRequires rust2rpm generates from it.
+
+    Runs cargo2rpm like %cargo_generate_buildrequires in the spec, with its
+    feature flags, and with dev-dependencies unless the spec disables %check.
+    """
+    key = (str(pkg.dir), pkg.version)
+    if key not in _BUILD_INFO:
+        spec = pkg.spec.read_text()
+        m = re.search(r"^%cargo_generate_buildrequires(.*)$", spec, re.M)
+        flags = (m.group(1) if m else "").split()
+        check = re.search(r"^%bcond\s+check\s+(\d)", spec, re.M)
+        with_check = "-t" in flags or not check or check.group(1) == "1"
+        args, it = [], iter(flags)
+        for f in it:
+            if f == "-a":
+                args.append("--all-features")
+            elif f == "-n":
+                args.append("--no-default-features")
+            elif f.startswith("-f"):
+                args += ["--features", f[2:] or next(it, "")]
+        with tempfile.TemporaryDirectory() as tmp:
+            src = extract_patched(pkg, Path(tmp))
+            toml = tomllib.loads((src / "Cargo.toml").read_text())
+            res = run(["cargo2rpm", "--path", "Cargo.toml", "buildrequires", *args,
+                       *(["--with-check"] if with_check else [])], cwd=src, capture_output=True)
+        if res.returncode:
+            die(f"{pkg.crate}: cargo2rpm buildrequires failed:\n{res.stderr}")
+        _BUILD_INFO[key] = (toml, res.stdout.split("\n"))
+    return _BUILD_INFO[key]
+
+
+def dep_kinds(pkg: LocalPackage) -> dict[str, set[str]]:
+    """crate -> kinds (normal, dev, build) in the package's patched Cargo.toml."""
+    kinds: dict[str, set[str]] = collections.defaultdict(set)
+    if pkg.crate_file and pkg.crate_file.exists():
+        for d in manifest_deps(build_info(pkg)[0]):
+            kinds[d["crate_id"]].add(d["kind"])
+    return kinds
+
+
+def provided_features(toml: dict) -> set[str]:
+    """Features a package built from this Cargo.toml provides (crate(name/feature))."""
+    feats = toml.get("features", {})
+    explicit = {i[4:] for items in feats.values() for i in items if i.startswith("dep:")}
+    optional = {d["name"] for d in manifest_deps(toml) if d["optional"] and d["kind"] == "normal"}
+    return set(feats) | {"", "default"} | (optional - explicit)
+
+
+def target_availability(idx: FedoraIndex, rel: str, req: "MissingReq") -> tuple[str | None, str]:
+    """(the target's version that satisfies req, or None and why not)."""
+    have = idx.versions(req.crate)
+    fitting = [v for v in have if req_matches(req.req, v)]
+    lacking = idx.missing_features(req.crate, fitting[-1], req.features) if fitting else []
+    if fitting and not lacking:
+        return fitting[-1], ""
+    if fitting:
+        return None, f"{rel} has {fitting[-1]} without feature(s) {', '.join(lacking)}"
+    if have:
+        return None, f"{rel} has only {', '.join(have)}"
+    return None, f"not in {rel}"
+
+
+_TARGET_INDEX: dict[str, FedoraIndex] = {}
+
+
+def target_index(chroot: str, refresh: bool = False) -> FedoraIndex:
+    """The crate index of a chroot's release (shared by all its architectures)."""
+    rel = chroot_release(chroot) if re.search(r"-(\d+|rawhide)-[^-]+$", chroot) else chroot
+    if rel not in _TARGET_INDEX:
+        _TARGET_INDEX[rel] = fedora_index(refresh, f"{rel}-x86_64")
+    return _TARGET_INDEX[rel]
 
 
 @dataclass
@@ -1581,8 +1664,6 @@ class CoprState:
         self.local = local_packages(root)
         self.refresh = refresh
         self._diag: dict[str, PackageDiag] = {}
-        self._index: dict[str, FedoraIndex] = {}
-        self._kinds: dict[str, dict[str, set[str]]] = {}
         try:
             self.project_chroots = sorted(copr_api("project/", ownername=self.owner,
                                                    projectname=self.name)["chroot_repos"])
@@ -1590,22 +1671,10 @@ class CoprState:
             die(f"cannot read COPR project {project}: {exc}")
 
     def index(self, chroot: str) -> FedoraIndex:
-        rel = chroot_release(chroot)
-        if rel not in self._index:
-            self._index[rel] = fedora_index(self.refresh, chroot)
-        return self._index[rel]
+        return target_index(chroot, self.refresh)
 
     def dep_kinds(self, pkg: LocalPackage) -> dict[str, set[str]]:
-        """crate -> kinds (normal, dev, build) in the package's patched Cargo.toml."""
-        if pkg.crate not in self._kinds:
-            kinds: dict[str, set[str]] = collections.defaultdict(set)
-            if pkg.crate_file and pkg.crate_file.exists():
-                with tempfile.TemporaryDirectory() as tmp:
-                    toml = tomllib.loads((extract_patched(pkg, Path(tmp)) / "Cargo.toml").read_text())
-                for d in manifest_deps(toml):
-                    kinds[d["crate_id"]].add(d["kind"])
-            self._kinds[pkg.crate] = kinds
-        return self._kinds[pkg.crate]
+        return dep_kinds(pkg)
 
     def builds(self, pkg: LocalPackage, evr: str) -> list[dict]:
         """Builds of this version, newest first."""
@@ -1719,20 +1788,11 @@ class CoprState:
                 return "retry"
             d.notes.append(f"{label}: local {dep.crate} failed there too (build {blink}); fix it first")
             return "blocked"
-        idx = self.index(chroot)
         rel = chroot_release(chroot)
-        have = idx.versions(req.crate)
-        fitting = [v for v in have if req_matches(req.req, v)]
-        lacking = idx.missing_features(req.crate, fitting[-1], req.features) if fitting else []
-        if fitting and not lacking:
-            d.notes.append(f"{label}: {rel} has {fitting[-1]} now; resubmit")
+        version, why = target_availability(self.index(chroot), rel, req)
+        if version:
+            d.notes.append(f"{label}: {rel} has {version} now; resubmit")
             return "retry"
-        if fitting:
-            why = f"{rel} has {fitting[-1]} without feature(s) {', '.join(lacking)}"
-        elif have:
-            why = f"{rel} has only {', '.join(have)}"
-        else:
-            why = f"not in {rel}"
         if dep:
             why += f"; the local package is {dep.version or 'not generated'}"
         d.notes.append(f"{label}: {why}")
@@ -1755,6 +1815,125 @@ class CoprState:
             path.write_bytes(data)
             return path
         return None
+
+
+# ─── target check (before submitting) ────────────────────────────────────────
+
+@dataclass
+class TargetProblem:
+    req: MissingReq
+    why: str
+    external: bool   # missing from the target and not in the tree (vs. a local package's problem)
+
+
+def check_target(pkg: LocalPackage, chroot: str, local: dict[str, LocalPackage],
+                 refresh: bool = False) -> tuple[list[TargetProblem], list[str]]:
+    """Would the package's BuildRequires resolve in this chroot's release?
+
+    Local packages built for the target count, if their version and features
+    fit.  Returns the problems and informational notes.
+    """
+    rel = chroot_release(chroot) if re.search(r"-(\d+|rawhide)-[^-]+$", chroot) else chroot
+    toml, brs = build_info(pkg)
+    kinds = dep_kinds(pkg)
+    reqs: dict[tuple, MissingReq] = {}
+    for line in brs:
+        if CRATE_REQ_RE.search(line):
+            req = MissingReq.parse(line)
+            have = reqs.setdefault(req.key(), req)
+            have.features += [f for f in req.features if f not in have.features]
+    idx = target_index(chroot, refresh)
+    problems, notes = [], []
+    for req in reqs.values():
+        k = kinds.get(req.crate, set())
+        req.tests_only = bool(k) and k <= {"dev"}
+        dep = local.get(req.crate)
+        if dep and dep.version and dep.builds_in(chroot) and req_matches(req.req, dep.version):
+            lacking = [f for f in req.features if f not in provided_features(build_info(dep)[0])]
+            if lacking:
+                problems.append(TargetProblem(req, f"local {dep.crate} {dep.version} lacks feature(s) "
+                                              f"{', '.join(lacking)} (dropped in its {EDITS_FILE}?)", False))
+            continue
+        version, why = target_availability(idx, rel, req)
+        if version:
+            continue
+        if dep and not dep.builds_in(chroot):
+            why += f"; the local package is only for {', '.join(dep.targets)}"
+        elif dep:
+            why += f"; the local package is {dep.version or 'not generated'}"
+        problems.append(TargetProblem(req, why, True))
+    if idx.versions(pkg.crate) and pkg.version not in idx.versions(pkg.crate):
+        notes.append(f"{rel} ({', '.join(idx.versions(pkg.crate))})")
+    return problems, notes
+
+
+def report_target_check(plan: list[tuple[LocalPackage, list[str]]], local: dict[str, LocalPackage],
+                        refresh: bool = False, quiet: bool = False) -> int:
+    """Check (package, chroots) pairs by release and print the result; returns the number of problems."""
+    count = 0
+    external: dict[str, dict[str, tuple[str, set[str]]]] = collections.defaultdict(dict)
+    for pkg, chroots in plan:
+        if not pkg.version:
+            continue
+        releases = sorted({chroot_release(c) for c in chroots})
+        results = {rel: check_target(pkg, f"{rel}-x86_64", local, refresh) for rel in releases}
+        if quiet and not any(r[0] for r in results.values()):
+            continue
+        info(f"{pkg.crate} {pkg.version}:")
+        groups: dict[tuple, list[str]] = {}
+        shadows = [n for rel in releases for n in results[rel][1]]
+        for rel in releases:
+            probs = results[rel][0]
+            lines = tuple(f"missing {pr.req.label()}{' (tests only)' if pr.req.tests_only else ''}: {pr.why}"
+                          for pr in probs)
+            groups.setdefault(lines, []).append(rel)
+            count += len(probs)
+            for pr in probs:
+                if pr.external:
+                    _, users = external[rel].setdefault(pr.req.label(), (pr.why, set()))
+                    users.add(pkg.crate + (" (tests)" if pr.req.tests_only else ""))
+        for lines, rels in groups.items():
+            if not lines:
+                if not quiet:
+                    info(f"   ok       {' '.join(rels)}")
+                continue
+            info(f"   MISSING  {' '.join(rels)}")
+            for ln in lines:
+                info(f"            {ln}")
+        if shadows and not quiet:
+            info(f"   note: other versions of rust-{pkg.crate} are in {', '.join(shadows)}; in this project's "
+                 "builds there the local one is picked, so a build needing an older version too cannot resolve")
+    if external:
+        info("missing from a target and not in this tree:")
+        for rel, reqs in sorted(external.items()):
+            info(f"    {rel}:")
+            for lbl, (why, users) in sorted(reqs.items()):
+                info(f"      {lbl}  ({why}; needed by {', '.join(sorted(users))})")
+        info("  package them for that target ('resolve -r <chroot>', 'init --recursive -r <chroot>'), "
+             "or leave the target out for the packages that need them")
+    return count
+
+
+def project_chroots(project: str) -> list[str]:
+    owner, _, name = project.partition("/")
+    try:
+        return sorted(copr_api("project/", ownername=owner, projectname=name)["chroot_repos"])
+    except urllib.error.HTTPError as exc:
+        die(f"cannot read COPR project {project}: {exc}")
+
+
+def cmd_check_targets(args) -> None:
+    if not args.chroot and not args.project:
+        die("name the targets with -r CHROOT, or --project to use all chroots of a COPR project")
+    chroots = args.chroot or project_chroots(args.project)
+    pkgs = [p for s in build_stages(select(args.root, args.crates, args.all), args.root, warn_outside=False)
+            for p in s]
+    plan = [(p, [c for c in chroots if p.builds_in(c)]) for p in pkgs]
+    n = report_target_check([(p, cs) for p, cs in plan if cs], local_packages(args.root), args.refresh,
+                            quiet=args.quiet)
+    if n:
+        die(f"{n} BuildRequires would not resolve")
+    info(f"all BuildRequires resolve in {', '.join(sorted({chroot_release(c) for c in chroots}))}")
 
 
 def copr_retry_plan(stages: list[list[LocalPackage]], root: Path, project: str,
@@ -2626,10 +2805,21 @@ def main() -> None:
     sp.add_argument("-r", "--chroot", action="append", default=[])
     sp.add_argument("-n", "--dry-run", action="store_true")
     sp.add_argument("--wait", action="store_true", help="wait until all builds have finished")
+    sp.add_argument("--force", action="store_true",
+                    help="submit even if 'check-targets' finds BuildRequires that would not resolve")
     sp.add_argument("--retry-failed", action="store_true",
                     help="resubmit only the chroots whose failure can succeed now (see copr-status), "
                          "and packages with no build of their current version")
     sp.set_defaults(func=cmd_copr)
+
+    sp = sub.add_parser("check-targets",
+                        help="check that every BuildRequires resolves in each target chroot (before 'copr')")
+    with_sel(sp)
+    sp.add_argument("-r", "--chroot", action="append", default=[], help="target chroot (repeatable)")
+    sp.add_argument("--project", help="COPR project whose chroots are the targets, e.g. user/project")
+    sp.add_argument("-q", "--quiet", action="store_true", help="show only packages with problems")
+    sp.add_argument("--refresh", action="store_true", help="refresh the cached crate lists of the targets")
+    sp.set_defaults(func=cmd_check_targets)
 
     sp = sub.add_parser("copr-status", help="diagnose the COPR builds of the current versions per chroot (read-only)")
     with_sel(sp)

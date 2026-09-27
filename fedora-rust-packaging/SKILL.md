@@ -4,7 +4,7 @@ description: Package Rust crates for Fedora with rust2rpm, including every depen
 compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
 argument-hint: "<crate>[@ver]… | --manifest <Cargo.toml> | <rust-deps command> [args] [--root <dir>]"
 metadata:
-  version: "1.10"
+  version: "1.11"
 ---
 
 # Fedora Rust crate packaging
@@ -41,6 +41,7 @@ Read them as follows (forms can be combined with `--root <dir>`):
   `Cargo.toml`: package the project's dependencies that Fedora is missing.
 - **a `rust-deps` command** with its arguments (`status`, `resolve …`,
   `trial <crate>`, `srpm --all`, `review --all -r <chroot>`,
+  `check-targets --all --project <owner/project>`,
   `copr-status --all --project <owner/project>`,
   `review-status --all`, `review-status --user <login>`, …): run only that
   step and report its result.
@@ -150,6 +151,11 @@ Read them as follows (forms can be combined with `--root <dir>`):
      remaining packages. The local repository keeps what already built.
    - Otherwise print `$T mock-chain --all -n` and the COPR command
      (`$T copr --all --project <p> -r <chroot> -n`) for the user.
+   - **Before any COPR submission**, run `$T check-targets --all --project <p>`
+     (or `-r` for the chroots to build). mock covers one chroot; this checks
+     every target's crates in seconds. Handle what it reports like `BLOCKED`
+     below *before* submitting. `copr` refuses to submit while it finds
+     problems; pass `--force` only when the user decided to accept them.
    - **COPR failures** (any chroot, any time the user reports failed COPR
      builds): run `$T copr-status --all --project <p>` (read-only) and follow
      "COPR build failures" in `references/MANUAL.md`.
