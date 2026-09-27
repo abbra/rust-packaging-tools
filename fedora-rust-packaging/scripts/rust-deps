@@ -2121,8 +2121,16 @@ def cmd_copr_status(args) -> None:
     if args.json:
         _HYPERLINKS = False
     stages = build_stages(select(args.root, args.crates, args.all), args.root, warn_outside=False)
-    state = CoprState(args.project, args.root, args.refresh)
-    diags = [[state.diagnose(p) for p in s] for s in stages]
+    while True:
+        state = CoprState(args.project, args.root, args.refresh)
+        diags = [[state.diagnose(p) for p in s] for s in stages]
+        active = sum(1 for s in diags for pd in s for c, cd in pd.chroots.items()
+                     if cd.verdict in ("active", "wait") and (not args.chroot or c in args.chroot))
+        if not args.wait or not active:
+            break
+        info(f"{time.strftime('%H:%M')} {active} chroot(s) still building or waiting; "
+             f"checking again in {args.interval}s")
+        time.sleep(args.interval)
     for pd in (pd for s in diags for pd in s):  # restrict to the chroots asked for
         pd.chroots = {c: cd for c, cd in pd.chroots.items() if not args.chroot or c in args.chroot}
     if args.json:
@@ -2187,11 +2195,21 @@ def cmd_copr_status(args) -> None:
             info("  '(tests)': only the tests need it; building that chroot without them is possible for "
                  "the whole project: copr-cli edit-chroot --rpmbuild-without check "
                  f"{args.project}/<chroot> (targets: {', '.join(sorted(tests_only))})")
-    errors = sorted({pd.pkg.crate for pd in all_pd for cd in pd.chroots.values() if cd.verdict == "error"})
+    host_arch = os.uname().machine  # reproduce on the host's architecture when it failed there too
+    errors = [(pd, c) for pd in all_pd for c, cd in sorted(pd.chroots.items(), key=lambda kv: (
+        not kv[0].endswith("-" + host_arch), kv[0])) if cd.verdict == "error"]
     if errors:
-        info(f"- build errors in: {', '.join(errors)}. Read the logs; reproduce with "
-             "'mock-chain -r <chroot>', fix, 'srpm', then submit them and their dependents with "
-             "'copr -r <chroot>'")
+        me = f"rust-deps --root {args.root}"
+        info("- build errors: read the summary ('copr-log'), reproduce in mock, fix, 'srpm', then submit "
+             "the package and its dependents with 'copr -r <chroot>':")
+        seen = set()
+        for pd, c in errors:
+            key = (pd.pkg.crate, mock_chroot(c).rsplit("-", 1)[0])
+            if key in seen:
+                continue
+            seen.add(key)
+            info(f"    {me} copr-log {pd.pkg.crate} -r {c} --project {args.project}")
+            info(f"    {me} mock-chain -r {mock_chroot(c)} {' '.join(local_closure(pd.pkg, c, state.local))}")
 
 
 # ─── fedora-review ───────────────────────────────────────────────────────────
@@ -2976,6 +2994,9 @@ def main() -> None:
     sp.add_argument("-r", "--chroot", action="append", default=[], help="only these chroots (repeatable)")
     sp.add_argument("--json", action="store_true")
     sp.add_argument("--refresh", action="store_true", help="refresh the cached crate lists of the targets")
+    sp.add_argument("--wait", action="store_true", help="wait until no chroot is building, then report")
+    sp.add_argument("--interval", type=int, default=120, metavar="S",
+                    help="with --wait: seconds between checks (default %(default)s)")
     sp.set_defaults(func=cmd_copr_status)
 
     sp = sub.add_parser("review", help="run fedora-review on each package (after mock-chain)")
