@@ -1327,20 +1327,29 @@ def cmd_mock_chain(args) -> None:
     sys.exit(run(cmd).returncode)
 
 
-def cmd_copr(args) -> None:
-    stages = build_stages(select(args.root, args.crates, args.all), args.root)
-    chroots = [a for c in args.chroot for a in ("-r", c)]
+def copr_submit(plan: list[list[tuple[LocalPackage, list[str]]]], project: str, dry_run: bool) -> list[str]:
+    """Submit (package, chroots) stages as chained COPR batches; returns the build IDs.
+
+    All builds of a stage share one batch (--with-build-id), and each batch
+    waits for the previous one (--after-build-id).  A build that only names a
+    batch with --after-build-id is not part of it: without --with-build-id
+    the next stage would wait for the first build of a stage alone.  An
+    empty chroot list means all chroots of the project.
+    """
     after = None
     ids = []
-    for i, stage in enumerate(stages, 1):
+    for i, stage in enumerate(plan, 1):
+        if not stage:
+            continue
         info(f"=== stage {i}")
         first = None
-        for p in stage:
-            cmd = ["copr-cli", "build", "--nowait", *chroots,
-                   *(["--after-build-id", after] if after else []), args.project, str(srpm_of(p))]
+        for p, chroots in stage:
+            chain = ["--with-build-id", first] if first else (["--after-build-id", after] if after else [])
+            cmd = ["copr-cli", "build", "--nowait", *(a for c in chroots for a in ("-r", c)),
+                   *chain, project, str(srpm_of(p))]
             info("$ " + " ".join(cmd))
-            if args.dry_run:
-                bid = "DRYRUN"
+            if dry_run:
+                bid = f"DRYRUN-{len(ids) + 1}"
             else:
                 res = run(cmd, capture_output=True)
                 if res.returncode:
@@ -1349,12 +1358,17 @@ def cmd_copr(args) -> None:
                 if not m:
                     die(f"cannot parse build id:\n{res.stdout}")
                 bid = m[-1]
-            info(f"   {p.crate}: build {bid if args.dry_run else link(copr_build_url(bid), bid)}")
+            info(f"   {p.crate}: build {bid if dry_run else link(copr_build_url(bid), bid)}")
             ids.append(bid)
             first = first or bid
-        # COPR puts a build with --after-build-id into the batch after the one
-        # holding that build, so chaining on any build of a stage waits for all.
         after = first
+    return ids
+
+
+def cmd_copr(args) -> None:
+    stages = build_stages(select(args.root, args.crates, args.all), args.root)
+    plan = [[(p, args.chroot) for p in s] for s in stages]
+    ids = copr_submit(plan, args.project, args.dry_run)
     if args.wait and not args.dry_run:
         info("waiting for the builds to finish")
         if run(["copr-cli", "watch-build", *ids]).returncode:
