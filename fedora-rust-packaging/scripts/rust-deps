@@ -904,9 +904,38 @@ def raw_url_templates(repo: str, sha: str) -> list[str]:
 SYS_BUILD_DEPS = ("pkg-config", "pkgconf", "system-deps", "bindgen", "cc", "cmake", "autotools", "vcpkg")
 
 
+@functools.cache
+def crate_links(name: str, req: str) -> str | None:
+    """The `links` key of the newest release of a crate matching req (from the crates.io index)."""
+    v = pick_version(name, req)
+    if not v:
+        return None
+    key = name.lower()
+    path = {1: f"1/{key}", 2: f"2/{key}", 3: f"3/{key[0]}/{key}"}.get(len(key), f"{key[:2]}/{key[2:4]}/{key}")
+    cache = CACHE_DIR / "cratesio" / f"{name}-index.jsonl"
+    if not cache.exists() or time.time() - cache.stat().st_mtime > 86400:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(_http_get(f"https://index.crates.io/{path}"))
+        except urllib.error.URLError:
+            return None
+    for ln in cache.read_text().splitlines():
+        entry = json.loads(ln)
+        if entry["vers"] == v["num"]:
+            return entry.get("links")
+    return None
+
+
 def sys_hint(toml: dict) -> str | None:
     """A reason to add system Build/Requires, for crates that link C libraries."""
     links = toml.get("package", {}).get("links")
+    if links:
+        # e.g. pyo3 (links = "pyo3-python") gets libpython through pyo3-ffi (links = "python"),
+        # whose -devel package requires it
+        for d in manifest_deps(toml):
+            if d["kind"] == "normal" and not d["optional"] and crate_links(d["crate_id"], d["req"]):
+                links = None
+                break
     bdeps = sorted(d for d in toml.get("build-dependencies", {}) if d in SYS_BUILD_DEPS)
     if not links and not bdeps:
         return None
