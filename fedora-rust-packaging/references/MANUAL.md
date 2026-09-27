@@ -57,6 +57,9 @@ current directory. The tool itself can live anywhere.
 
 You edit only `rust2rpm.toml` and `cargo-toml-edits.toml` (and
 `targets.toml`). After changing the first two, run `rust-deps regen <crate>`.
+When `cargo-toml-edits.toml` has no edits, `regen` keeps an existing
+`<crate>-fix-metadata.diff` as a hand-made patch; if you removed the last
+edit, delete that file too (`regen` warns when no comment explains it).
 
 ## Quick start
 
