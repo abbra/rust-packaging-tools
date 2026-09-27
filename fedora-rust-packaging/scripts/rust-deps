@@ -1133,6 +1133,19 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
             if (built.parent / "repodata").exists() and shutil.which("createrepo_c"):
                 run(["createrepo_c", "-q", "--update", str(built.parent)])
     new = local_packages(pkg.dir.parent).get(pkg.crate)
+    if new and new.version and LICENSE_FIXME_RE.search(new.spec.read_text()):
+        if lic := binary_license(new):
+            info(f"   License of the executables: {lic}")
+            new.spec.write_text(LICENSE_FIXME_RE.sub(
+                lambda m: "# the crates linked into the executables, as %%cargo_license_summary reports them "
+                          f"(filled in by rust-deps)\nLicense:{m.group(1)}{lic}", new.spec.read_text()))
+        else:
+            action(f"{pkg.crate}: cannot compute the License of the executables (cargo fetch or cargo2rpm "
+                   "license-summary failed); see %cargo_license_summary in a mock build log")
+    if new and new.version and (fixme := [ln.strip() for ln in new.spec.read_text().splitlines() if "FIXME" in ln]):
+        action(f"{pkg.crate}: the spec still has FIXME: {'; '.join(fixme)}. For a cdylib crate whose shared "
+               "library is not shipped, set cargo-install-bin = false and suppress-cdylib-install-fixme = true "
+               "under [package] in rust2rpm.toml")
     if new and new.version:
         for old in pkg.dir.glob(f"{pkg.crate}-*.crate"):
             if old.name != f"{pkg.crate}-{new.version}.crate":
@@ -1146,6 +1159,47 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
                    "the package must work without its documentation, so add to [package] in rust2rpm.toml: "
                    f"doc-files.exclude = {json.dumps(compiled)}, with a comment saying why")
     return True
+
+
+LICENSE_FIXME_RE = re.compile(r"^# FIXME: paste output of %%cargo_license_summary here\nLicense:( +)# FIXME$", re.M)
+
+
+def binary_license(pkg: LocalPackage) -> str | None:
+    """The License of the package's executables: what %cargo_license_summary reports.
+
+    rust2rpm can only fill it in where the dependencies are installed; here
+    cargo fetches them from crates.io, and cargo2rpm sums up the licenses of
+    the crates linked into the binaries (no build, dev or proc-macro edges).
+    """
+    spec = pkg.spec.read_text()
+    m = re.search(r"^%cargo_build(.*)$", spec, re.M)
+    flags = (m.group(1) if m else "").split()
+    args, it = [], iter(flags)
+    for f in it:
+        if f in ("-a", "-n"):
+            args.append({"-a": "--all-features", "-n": "--no-default-features"}[f])
+        elif f.startswith("-f"):
+            args += ["--features", f[2:] or next(it, "")]
+    # cargo tree as %cargo_license_summary (cargo2rpm) runs it, but online: offline, a fresh
+    # resolution without dev-dependencies can miss crates that 'cargo fetch' did not index
+    env = {**os.environ, "RUSTC_BOOTSTRAP": "1"}
+    with tempfile.TemporaryDirectory() as tmp:
+        src = extract_patched(pkg, Path(tmp))
+        res = run(["cargo", "tree", "-Zavoid-dev-deps", "--workspace", "--edges=no-build,no-dev,no-proc-macro",
+                   "--target=all", "--prefix=none", "--format", "# {l}", *args],
+                  cwd=src, env=env, capture_output=True)
+    if res.returncode:
+        return None
+    licenses = set()
+    for ln in res.stdout.splitlines():
+        lic = ln.removeprefix("# ").removesuffix(" (*)").strip().replace("/", " OR ")
+        if not lic:
+            return None  # a crate with only a license-file: needs a look
+        if " OR " in lic and "(" not in lic and " AND " not in lic:  # MIT OR Apache-2.0 == Apache-2.0 OR MIT
+            lic = " OR ".join(sorted(lic.split(" OR ")))
+        licenses.add(lic)
+    parts = sorted(licenses, key=lambda x: (" " in x, x))
+    return " AND ".join(f"({p})" if len(parts) > 1 and " " in p else p for p in parts)
 
 
 def compiled_doc_files(crate_file: Path, spec: Path) -> list[str]:
