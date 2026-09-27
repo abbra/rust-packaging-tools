@@ -1305,6 +1305,23 @@ def trial(pkg: LocalPackage, discover: bool, apply: bool = False, log_name: str 
         return ok
 
     targets = crate_targets(src)
+    toml = tomllib.loads((src / "Cargo.toml").read_text())
+    feats = toml.get("features", {})
+    if "--all-features" in fargs:
+        enabled = set(feats) | {"default"}
+    else:
+        start = set(fargs[fargs.index("--features") + 1].split(",")) if "--features" in fargs else set()
+        if "--no-default-features" not in fargs:
+            start.add("default")
+        enabled = feature_closure(feats, start)[0] | feature_closure(feats, start)[1]
+    skipped = {}
+    for t in toml.get("test", []):
+        need = [f for f in t.get("required-features", []) if f not in enabled]
+        if need and f"test:{t['name']}" in targets:
+            skipped[f"test:{t['name']}"] = need
+            del targets[f"test:{t['name']}"]
+    for t, need in skipped.items():
+        info(f"   {t:24} skipped needs feature(s) {', '.join(need)}; %cargo_test skips it too")
     # 1. which targets compile at all
     rc, out = _cargo_test(src, fargs + ["--no-run", *(["--lib"] if "lib" in targets else []), "--tests"], log)
     broken, errors = {}, []
