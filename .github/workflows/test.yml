@@ -1,0 +1,42 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: unit tests (offline)
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:latest
+    steps:
+      - name: Install dependencies
+        run: dnf -y install --setopt=install_weak_deps=False git-core python3 python3-pytest rust2rpm
+      - uses: actions/checkout@v4
+      - name: Compile
+        run: python3 -m py_compile fedora-rust-packaging/scripts/rust-deps
+      - name: Unit tests
+        run: python3 -m pytest -v tests
+
+  smoke:
+    name: smoke test (crates.io, Fedora mirrors)
+    runs-on: ubuntu-latest
+    container:
+      image: registry.fedoraproject.org/fedora:latest
+      # trial runs tests offline in a user namespace (unshare -rn), as mock does
+      options: --privileged
+    steps:
+      - name: Install dependencies
+        run: >-
+          dnf -y install --setopt=install_weak_deps=False
+          git-core python3 rust2rpm cargo2rpm cargo rust rpm-build rpmdevtools rpmlint
+          redhat-rpm-config patch util-linux-core iproute
+      - uses: actions/checkout@v4
+      - name: rust-deps --help
+        run: fedora-rust-packaging/scripts/rust-deps --help
+      - name: Smoke test
+        run: tests/smoke.sh

@@ -100,6 +100,19 @@ rust-deps review-status --user username              # all your review tickets, 
 The full workflow and reference is in
 [`fedora-rust-packaging/references/MANUAL.md`](fedora-rust-packaging/references/MANUAL.md).
 
+## Tests
+
+```
+python3 -m pytest tests          # unit tests: offline, need python3-pytest and rust2rpm
+tests/smoke.sh [crate@version]   # end to end on a crate from crates.io (default num-cmp@0.1.0):
+                                 # doctor, resolve, init, regen, trial, srpm, order,
+                                 # check-targets, copr -n, status; needs network
+```
+
+GitHub Actions runs both in a Fedora container on every push and pull request
+(`.github/workflows/test.yml`); the smoke test's container is privileged, as
+`trial` runs tests offline in a user namespace.
+
 ## Use it through an agent
 
 Once installed, ask for the result, for example: "package the Rust crates
