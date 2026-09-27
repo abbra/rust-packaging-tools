@@ -220,17 +220,59 @@ class FedoraIndex:
         return [f for f in features if f not in have]
 
 
-def fedora_index(refresh: bool = False) -> FedoraIndex:
+def chroot_metalinks(chroot: str) -> list[str]:
+    """Fedora mirror metalink repos that hold the crates of a COPR/mock chroot.
+
+    Only the repositories that ship rust-*-devel packages: Fedora, or EPEL for
+    the RHEL/CentOS based chroots (RHEL and CentOS ship no crates).  COPR's
+    rhel+epel-N (N >= 10) uses EPEL for the current RHEL minor ("epel-z").
+    """
+    m = re.fullmatch(r"(.+)-(\d+|rawhide)-([^-]+)", chroot)
+    if not m:
+        die(f"cannot parse chroot {chroot!r} (expected e.g. fedora-44-x86_64, rhel+epel-10-x86_64)")
+    dist, rel = m.group(1), m.group(2)
+    if dist == "fedora":
+        return ["rawhide"] if rel == "rawhide" else [f"fedora-{rel}", f"updates-released-f{rel}"]
+    if dist == "rhel+epel":
+        return [f"epel-z-{rel}" if int(rel) >= 10 else f"epel-{rel}"]
+    if dist in ("epel", "centos-stream+epel", "almalinux+epel", "rocky+epel"):
+        return [f"epel-{rel}"]
+    if dist == "centos-stream+epel-next":
+        return [f"epel-{rel}", f"epel-next-{rel}"]
+    die(f"do not know the crate repositories of chroot {chroot}")
+
+
+def chroot_release(chroot: str) -> str:
+    """The chroot without its architecture: crates are noarch, so all arches share one index."""
+    return chroot.rsplit("-", 1)[0]
+
+
+def fedora_index(refresh: bool = False, chroot: str | None = None) -> FedoraIndex:
     """All crate(...) provides of rust-*-devel packages in the enabled repos.
 
     Cached for a day; set RUST_DEPS_DNF_ARGS (e.g. "--releasever=rawhide") to
-    query a different release than the running system.
+    query a different release than the running system, or pass a COPR/mock
+    chroot (e.g. "rhel+epel-10-x86_64") to query that target's repositories.
     """
-    extra = os.environ.get("RUST_DEPS_DNF_ARGS", "").split()
-    tag = re.sub(r"[^A-Za-z0-9_.=-]", "_", "_".join(extra)) or "system"
+    if chroot:
+        tag = "chroot-" + re.sub(r"[^A-Za-z0-9_.=-]", "_", chroot_release(chroot))
+        repodir = CACHE_DIR / "repos" / tag
+        repodir.mkdir(parents=True, exist_ok=True)
+        (repodir / "crates.repo").write_text("".join(
+            f"[{r}]\nname={r}\ngpgcheck=0\n"
+            f"metalink=https://mirrors.fedoraproject.org/metalink?repo={r}&arch=x86_64\n\n"
+            for r in chroot_metalinks(chroot)))
+        dnfcache = CACHE_DIR / "dnf"
+        extra = [f"--setopt=reposdir={repodir}", f"--setopt=cachedir={dnfcache}",
+                 f"--setopt=system_cachedir={dnfcache}"]
+        where = f"{chroot_release(chroot)} repositories ({', '.join(chroot_metalinks(chroot))})"
+    else:
+        extra = os.environ.get("RUST_DEPS_DNF_ARGS", "").split()
+        tag = re.sub(r"[^A-Za-z0-9_.=-]", "_", "_".join(extra)) or "system"
+        where = "Fedora repositories"
     cache = CACHE_DIR / f"fedora-crates-{tag}.txt"
     if refresh or not cache.exists() or time.time() - cache.stat().st_mtime > 86400:
-        info("Querying Fedora repositories for packaged crates (cached for 24h)…")
+        info(f"Querying {where} for packaged crates (cached for 24h)…")
         res = run(["dnf", "-q", "repoquery", *extra, "--provides", "rust-*-devel"], capture_output=True)
         if res.returncode != 0:
             die(f"dnf repoquery failed:\n{res.stderr}")
@@ -615,7 +657,7 @@ def seeds_from_manifest(path: Path) -> list[tuple[str, str, str, list[str]]]:
 
 
 def cmd_resolve(args) -> None:
-    fedora = fedora_index(args.refresh)
+    fedora = fedora_index(args.refresh, args.target)
     local = {} if args.ignore_local else local_packages(args.root)
     for extra in args.local_root or []:
         local = {**local_packages(Path(extra)), **local}
@@ -871,7 +913,7 @@ def write_config(path: Path, crate: str, edits: dict, lic_names: list[str], lic_
 
 
 def cmd_init(args) -> None:
-    fedora = fedora_index(args.refresh)
+    fedora = fedora_index(args.refresh, args.target)
     root: Path = args.root
     queue = []
     for spec in args.crates:
@@ -1986,7 +2028,7 @@ def cmd_review_status(args) -> None:
 # ─── status ──────────────────────────────────────────────────────────────────
 
 def cmd_status(args) -> None:
-    fedora = fedora_index(args.refresh)
+    fedora = fedora_index(args.refresh, args.target)
     rows = [("crate", "packaged", "crates.io", "fedora", "patch", "srpm")]
     for pkg in select(args.root, args.crates, args.all or not args.crates):
         latest = pick_version(pkg.crate)
@@ -2063,6 +2105,9 @@ def main() -> None:
     sp.add_argument("--local-root", action="append", metavar="DIR",
                     help="another package tree whose packages count as available (repeatable)")
     sp.add_argument("--json", action="store_true")
+    sp.add_argument("-r", "--chroot", dest="target", metavar="CHROOT",
+                    help="check against the crate repositories of this COPR/mock chroot "
+                         "(e.g. fedora-44-x86_64, rhel+epel-10-x86_64) instead of the host's")
     sp.add_argument("--refresh", action="store_true", help="refresh the cached Fedora crate list")
     sp.set_defaults(func=cmd_resolve)
 
@@ -2072,6 +2117,9 @@ def main() -> None:
     sp.add_argument("--force", action="store_true", help="re-initialize existing packages (overwrites config)")
     sp.add_argument("--no-trial", action="store_true", help="skip the test discovery run")
     sp.add_argument("--apply-tests", action="store_true", help="write the suggested [tests] table")
+    sp.add_argument("-r", "--chroot", dest="target", metavar="CHROOT",
+                    help="check against the crate repositories of this COPR/mock chroot "
+                         "(e.g. fedora-44-x86_64, rhel+epel-10-x86_64) instead of the host's")
     sp.add_argument("--refresh", action="store_true")
     sp.set_defaults(func=cmd_init)
 
@@ -2155,6 +2203,9 @@ def main() -> None:
 
     sp = sub.add_parser("status", help="show local packages vs. crates.io and Fedora")
     with_sel(sp)
+    sp.add_argument("-r", "--chroot", dest="target", metavar="CHROOT",
+                    help="check against the crate repositories of this COPR/mock chroot "
+                         "(e.g. fedora-44-x86_64, rhel+epel-10-x86_64) instead of the host's")
     sp.add_argument("--refresh", action="store_true")
     sp.set_defaults(func=cmd_status)
 

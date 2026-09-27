@@ -113,8 +113,8 @@ hold:
 
 | command | purpose |
 |---|---|
-| `resolve CRATE[@REQ]… [--manifest Cargo.toml] [--local-root DIR]… [--json]` | Recursively list crates to package. **NEW** = not in Fedora. **UPDATE** = Fedora has other versions. **FEATURES** = Fedora's package lacks a requested feature. Also lists optional and dev dependencies that Fedora lacks. |
-| `init CRATE[@REQ]… [--recursive] [--force] [--no-trial] [--apply-tests]` | Create packages: drafts `cargo-toml-edits.toml`, `rust2rpm.toml` (patch comments, license sources) and the spec, then runs test discovery. Skips packages that already exist unless `--force` (which overwrites both files). |
+| `resolve CRATE[@REQ]… [--manifest Cargo.toml] [--local-root DIR]… [-r CHROOT] [--json]` | Recursively list crates to package. **NEW** = not in Fedora. **UPDATE** = Fedora has other versions. **FEATURES** = Fedora's package lacks a requested feature. Also lists optional and dev dependencies that Fedora lacks. With `-r CHROOT`, checks against that COPR/mock target's crates (e.g. `fedora-44-x86_64`, `rhel+epel-10-x86_64`) instead of the host's. |
+| `init CRATE[@REQ]… [--recursive] [--force] [--no-trial] [--apply-tests] [-r CHROOT]` | Create packages: drafts `cargo-toml-edits.toml`, `rust2rpm.toml` (patch comments, license sources) and the spec, then runs test discovery. Skips packages that already exist unless `--force` (which overwrites both files). `-r CHROOT` decides what is missing against that target, as for `resolve`. |
 | `regen CRATE…\|--all [--latest\|--version V\|--crate-file PATH]` | Regenerate spec and patches with rust2rpm, non-interactively. With `--latest` it updates the package to the newest release. With `--crate-file` (one crate only) it uses a local `.crate`, e.g. `cargo package` output of a version not yet on crates.io, and copies it into the package directory. |
 | `trial CRATE…\|--all [--discover [--apply]] [--timeout S] [--online]` | Build and test the patched crate with cargo. Like mock, tests run without network access (`unshare -rn`, after `cargo fetch`) unless `--online` is given; as in mock, the loopback interface is up, so tests using `127.0.0.1` work. Plain `trial` runs exactly the `%cargo_test` calls of the spec. `--discover` tries every test target and prints a `[tests]` table; `--apply` writes it, regenerates and re-checks (logging to `<crate>.recheck.log`, so the discovery log `<crate>.log` survives). |
 | `srpm CRATE…\|--all [--no-prep]` | Run `spectool -g` and `rpmbuild -bs`, then `rpmbuild -bp` (patches apply, license copy works) and `rpmlint`. |
@@ -125,7 +125,7 @@ hold:
 | `review-request CRATE…\|--all --project P --fas NAME [-r CHROOT] [--needs-sponsor] [--comment TEXT] [--koji-task CRATE=TASK]… [--file]` | Prepare the Bugzilla review request of each package, in dependency order, from its latest succeeded COPR build (chroot default `fedora-rawhide-x86_64`). Requires a passing `review` of the current SRPM and a published spec identical to the local one. Writes `review-request.txt`. `--koji-task` adds a link to a successful Koji scratch build of that crate's SRPM (checked through Koji). With `--file`, files it (or, if already filed, posts the new Spec/SRPM URLs) and records the bug in `review-request.json`. See "Submitting to Fedora". |
 | `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
-| `status [CRATE…]` | Show packaged version vs. crates.io vs. Fedora, and whether a patch and an SRPM exist. |
+| `status [CRATE…] [-r CHROOT]` | Show packaged version vs. crates.io vs. Fedora (or that target), and whether a patch and an SRPM exist. |
 
 Bugs, comments and builds in the output are links. On a terminal they are
 OSC 8 hyperlinks on short labels (the bug number, `#3`, the build ID);
@@ -135,10 +135,12 @@ terminals that do not support OSC 8.
 
 Caches live in `~/.cache/rust-packaging-tools`:
 - crates.io responses
-- the Fedora crate list, refreshed daily or with `--refresh` on `resolve`, `init` and `status`
+- the Fedora crate list, refreshed daily or with `--refresh` on `resolve`, `init` and `status`;
+  one list per target release for `-r CHROOT`
 - the cargo target directory used by trials, and trial logs
 
-To query another release than the running system, set
+To query another release than the running system, pass `-r CHROOT` (see
+"Other targets" for how targets map to repositories), or set
 `RUST_DEPS_DNF_ARGS="--releasever=rawhide"`.
 
 ## `cargo-toml-edits.toml`
@@ -333,6 +335,26 @@ building a stage, wait until the previous stage is in the buildroot
 branches, build there and create Bodhi updates. Close the review ticket with
 resolution `NEXTRELEASE` once the package is built (or let Bodhi close it), and
 add the package to release monitoring.
+
+## Other targets
+
+`resolve`, `init` and `status` check the host's Fedora release. With
+`-r CHROOT` they check a COPR or mock target instead, e.g. an older Fedora
+release or EPEL, which have their own crate versions.
+
+Targets and the repositories `-r CHROOT` queries (the ones that ship crates;
+RHEL and CentOS ship none):
+
+| chroot | repositories (Fedora mirror metalinks) |
+|---|---|
+| `fedora-N-*` | `fedora-N`, `updates-released-fN` |
+| `fedora-rawhide-*` | `rawhide` |
+| `rhel+epel-N-*` (N ≥ 10) | `epel-z-N` (EPEL for the current RHEL minor, as COPR uses) |
+| `rhel+epel-N-*` (N < 10), `epel-N-*`, `centos-stream+epel-N-*` | `epel-N` |
+| `centos-stream+epel-next-N-*` | `epel-N`, `epel-next-N` |
+
+Crates are noarch, so the architecture does not matter; one list per release
+is cached. Repositories added to the COPR project itself are not queried.
 
 ## Resolving `ACTION NEEDED`
 
