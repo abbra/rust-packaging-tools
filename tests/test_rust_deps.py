@@ -241,6 +241,24 @@ def test_targets_toml(tmp_path):
     assert not pkg.builds_in("fedora-45-x86_64")
 
 
+@pytest.mark.parametrize("tests, bad", [
+    ({"skip": ["tests::test_read_timeout", "::chain_call", "src/lib.rs"]}, []),
+    ({"skip": {"doc": ["src/lib.rs - (line 15)"], "lib": ["tests::ok"]}}, ["src/lib.rs - (line 15)"]),
+    ({"skip": {"doc": ["connection::Connection<S>::chain_", "%{name}"]}},
+     ["connection::Connection<S>::chain_", "%{name}"]),
+    ({}, []),
+])
+def test_unsafe_skips(tests, bad):
+    assert rd.unsafe_skips(tests) == bad
+
+
+def test_trial_refuses_unsafe_skips(tmp_path, capsys):
+    d = make_package(tmp_path, "smol", "rust-smol", "2.0.2")
+    (d / "rust2rpm.toml").write_text('[tests]\nrun = ["doc"]\nskip.doc = ["src/lib.rs - (line 15)"]\n')
+    assert rd.trial(rd.local_packages(tmp_path)["smol"], discover=False) is False
+    assert "not shell-safe" in capsys.readouterr().err
+
+
 def make_crate(tmp_path: Path, files: dict[str, tuple[str, int]]) -> Path:
     """A .crate archive with the given files: path -> (content, mode)."""
     import io

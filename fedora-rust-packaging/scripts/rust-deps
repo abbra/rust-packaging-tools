@@ -1138,6 +1138,8 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         return False
     if "TODO" in pkg.config_file.read_text():
         action(f"{pkg.crate}: rust2rpm.toml still contains TODO comments")
+    if bad := unsafe_skips(test_config(pkg)):
+        action(unsafe_skips_message(pkg.crate, bad))
     if "Summary" in out and "too long" in out:
         action(f"{pkg.crate}: generated Summary is too long; set package.summary in rust2rpm.toml and regen")
     if edits and not manual.exists():
@@ -1491,6 +1493,25 @@ def test_config(pkg: LocalPackage) -> dict:
     return tomllib.loads(pkg.config_file.read_text()).get("tests", {})
 
 
+# rust2rpm writes each [tests] skip filter unquoted into a %cargo_test line of
+# %check: the shell splits it at spaces and reads ( ) < > | & ; $ * ? [ ] and
+# quotes, and rpm expands %.  Only these characters survive as written.
+SHELL_SAFE_SKIP = re.compile(r"[A-Za-z0-9_:./+=,@-]+")
+
+
+def unsafe_skips(cfg: dict) -> list[str]:
+    """Skip filters of a [tests] table that would break the %check shell command."""
+    skip = cfg.get("skip", [])
+    names = skip if isinstance(skip, list) else [n for v in skip.values() for n in v]
+    return [n for n in names if not SHELL_SAFE_SKIP.fullmatch(n)]
+
+
+def unsafe_skips_message(crate: str, names: list[str]) -> str:
+    return (f"{crate}: [tests] skip filters {', '.join(map(repr, names))} are not shell-safe: rust2rpm writes "
+            "them unquoted into %check, where they break the %cargo_test command; use a part of the test "
+            "name without spaces or shell characters (e.g. '::chain_call'), matched without skip-exact")
+
+
 def feature_args(pkg: LocalPackage) -> list[str]:
     f = tomllib.loads(pkg.config_file.read_text()).get("features", {})
     args = []
@@ -1587,6 +1608,11 @@ def trial(pkg: LocalPackage, discover: bool, apply: bool = False, log_name: str 
     Without discover, run exactly the %cargo_test invocations of the spec.  With
     discover, try every test target and suggest a [tests] table.
     """
+    if not discover and (bad := unsafe_skips(test_config(pkg))):
+        # cargo would take them as they are, but %check fails on them
+        info(f"== trial {pkg.crate} {pkg.version}")
+        action(unsafe_skips_message(pkg.crate, bad))
+        return False
     src = extract_patched(pkg, CACHE_DIR / "trial")
     if TRIAL_OFFLINE:
         (src / "Cargo.lock").unlink(missing_ok=True)
@@ -1678,7 +1704,8 @@ def trial(pkg: LocalPackage, discover: bool, apply: bool = False, log_name: str 
         names = failing.get(t)
         if names is None:
             run_targets.append(t)
-        elif names and len(names) <= 5 and t != "doc":
+        elif (names and len(names) <= 5 and t != "doc"
+              and all(SHELL_SAFE_SKIP.fullmatch(re.sub(r" - .*", "", n)) for n in names)):
             run_targets.append(t)
             skip[t] = [re.sub(r" - .*", "", n) for n in names]
             comments.append(f"TODO: explain why these {t} tests are skipped: {', '.join(skip[t])}")
