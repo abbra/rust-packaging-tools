@@ -643,6 +643,14 @@ Typical reasons tests cannot run, and how to express them in `[tests]`:
 - **Depends on the CPU** (e.g. half-precision NaN on x86-64-v3, as RHEL 10 builds): skip that
   test and say so.
 
+rust2rpm writes each `skip` filter unquoted into the `%cargo_test` line of
+`%check`, so a filter must not contain spaces, shell characters (`( ) < > | & ;
+$ * ? [ ]`, quotes) or `%`. Doctest names (`src/lib.rs - (line 15)`) and
+generic paths (`Connection<S>::send`) cannot be used as they are: skip them
+by a part of the name (`::send`, or `src/lib.rs` when it has only that
+doctest), without `skip-exact`. `regen` asks for this, and `trial` fails
+on such filters, as `%check` would.
+
 `skip` as a table per target (`skip."test:codec" = [...]`) needs `run` to be a list:
 rust2rpm fails with `'TestsSkip' has no len()` otherwise. With `run` at its default, use the
 list form, `skip = ["codec::case_183"]` with `skip-exact = true`, which applies to all targets.
