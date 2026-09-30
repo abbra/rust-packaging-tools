@@ -269,6 +269,62 @@ def test_foreign_shebangs(tmp_path):
     assert rd.foreign_shebangs(crate, handled) == []
 
 
+# ─── updates to a new upstream release ──────────────────────────────────────
+
+def releases(monkeypatch, *nums):
+    monkeypatch.setattr(rd, "crate_versions", lambda name: [{"num": n, "yanked": False} for n in nums])
+
+
+def test_update_version(tmp_path, monkeypatch):
+    make_package(tmp_path, "native-ossl", "rust-native-ossl", "0.3.0")
+    make_package(tmp_path, "hashbrown", "rust-hashbrown0.15", "0.15.2")
+    pkgs = rd.local_packages(tmp_path)
+    releases(monkeypatch, "0.16.0", "0.15.5", "0.3.1", "0.3.0", "0.2.0")
+    assert rd.update_version(pkgs["native-ossl"], None) == ("0.16.0", None)
+    assert rd.update_version(pkgs["native-ossl"], "0.3.1") == ("0.3.1", None)
+    assert rd.update_version(pkgs["native-ossl"], "0.3.0")[1] == "already at 0.3.0"
+    assert "older" in rd.update_version(pkgs["native-ossl"], "0.2.0")[1]
+    assert "not on crates.io" in rd.update_version(pkgs["native-ossl"], "0.4.0")[1]
+    # a compat package stays in its series unless told otherwise
+    assert rd.update_version(pkgs["hashbrown"], None) == ("0.15.5", None)
+    assert "--no-compat" in rd.update_version(pkgs["hashbrown"], "0.16.0")[1]
+
+
+def test_repin_upstream_sources(tmp_path, monkeypatch):
+    old, new = "379bedbd040ff060f712f54377d41cb59e094f2b", "60f49306515247ae43aac5b370aaffc6e2abc741"
+    d = make_package(tmp_path, "ring-native-ossl", "rust-ring-native-ossl", "0.3.0")
+    url = "https://forge.fedoraproject.org/freeipa/native-ossl/raw/commit/{}/LICENSE"
+    (d / "rust2rpm.toml").write_text(f'[[package.extra-sources]]\nnumber = 10\nfile = "{url.format(old)}"\n')
+    pkg = rd.local_packages(tmp_path)["ring-native-ossl"]
+    monkeypatch.setattr(rd, "url_exists", lambda u: False)
+    assert rd.repin_upstream_sources(pkg, old, new) == [url.format(new)]
+    assert old not in pkg.config_file.read_text() and new in pkg.config_file.read_text()
+    assert rd.repin_upstream_sources(pkg, old, new) == []  # nothing pinned to the old commit any more
+
+
+def test_edits_drift():
+    toml = {"dependencies": {"serde": {"version": "1", "optional": True}},
+            "dev-dependencies": {"criterion": "0.5", "proptest": "1"}, "features": {"serde": ["dep:serde"]}}
+    edits = {"drop-dev-dependencies": ["criterion", "quickcheck"], "set-dev-version": {"proptest": "1.4"}}
+    suggested = {"drop-dev-dependencies": ["criterion", "proptest"], "drop-dependencies": ["serde"],
+                 "drop-features": ["serde"]}
+    new, stale = rd.edits_drift(toml, edits, suggested)
+    assert new == ["drop-dependencies: serde", "drop-features: serde"]  # proptest is handled by set-dev-version
+    assert stale == ["drop-dev-dependencies: quickcheck"]
+
+
+def test_broken_dependents(tmp_path):
+    d = make_package(tmp_path, "freeipa", "rust-freeipa", "0.1.0")
+    crate = make_crate(tmp_path, {"Cargo.toml": (
+        '[package]\nname = "freeipa"\n[dependencies.native-ossl]\nversion = "^0.3"\n'
+        '[dev-dependencies.native-ossl-sys]\nversion = "=0.3.0"\n', 0o644)})
+    crate.rename(d / "freeipa-0.1.0.crate")
+    make_package(tmp_path, "native-ossl", "rust-native-ossl", "0.4.0")
+    assert rd.broken_dependents({"native-ossl": "0.3.1", "native-ossl-sys": "0.3.1"}, tmp_path) == \
+        ["freeipa 0.1.0 needs native-ossl-sys =0.3.0 (dev)"]
+    assert rd.broken_dependents({"native-ossl": "0.4.0"}, tmp_path) == ["freeipa 0.1.0 needs native-ossl ^0.3 (normal)"]
+
+
 # ─── COPR logs ──────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("line, label", [

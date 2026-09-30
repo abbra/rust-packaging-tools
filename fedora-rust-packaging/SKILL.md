@@ -268,6 +268,14 @@ Read them as follows (forms can be combined with `--root <dir>`):
    available" or only the new local packages. Patch its spec requirement if you
    bumped a version.
 
+## Updating to a new upstream release
+
+`$T update <crate>… [--version V]` (or `--all`) updates packages to a new
+crates.io release in build order: it moves upstream sources pinned to the old
+release's commit, regenerates, and runs `trial`. Resolve its `ACTION NEEDED`
+lines, then `srpm`, `check-targets`, and `copr` or `mock-chain`; adopted
+packages go to Fedora with `dist-git`. Use `-n` to see the plan first.
+
 ## Packaging inside the upstream repository
 
 When the specs live in the crate's own repository (as `rust2rpm.toml` +
