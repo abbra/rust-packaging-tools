@@ -177,6 +177,13 @@ def crate_versions(name: str) -> list[dict]:
     return [v for v in data["versions"] if not v["yanked"]]
 
 
+def forget_crate_versions(names) -> None:
+    """Drop the cached release lists: a release published today is not in them."""
+    for n in names:
+        (CACHE_DIR / "cratesio" / f"{n}.json").unlink(missing_ok=True)
+    crate_versions.cache_clear()
+
+
 @functools.cache
 def crate_dependencies(name: str, version: str) -> list[dict]:
     data = _cached_json(
@@ -867,9 +874,18 @@ def suggest_edits(toml: dict, fedora: FedoraIndex, local: dict[str, LocalPackage
     return edits, notes
 
 
+def ships_license(crate_file: Path) -> bool:
+    return any(LICENSE_RE.match(Path(m).name) for m in crate_members(crate_file) if "/" not in m)
+
+
+def vcs_commit(crate_file: Path) -> str | None:
+    """The upstream git commit a crate was published from (.cargo_vcs_info.json)."""
+    return json.loads(read_crate_member(crate_file, ".cargo_vcs_info.json") or "{}").get("git", {}).get("sha1")
+
+
 def license_sources(crate_file: Path, toml: dict) -> tuple[list[str], list[str], list[str]]:
     """(license-files, source URLs, notes) for crates that do not ship license texts."""
-    if any(LICENSE_RE.match(Path(m).name) for m in crate_members(crate_file) if "/" not in m):
+    if ships_license(crate_file):
         return [], [], []
     vcs = json.loads(read_crate_member(crate_file, ".cargo_vcs_info.json") or "{}")
     sha = vcs.get("git", {}).get("sha1")
@@ -1294,6 +1310,141 @@ def cmd_regen(args) -> None:
             failed.append(pkg.crate)
     if failed:
         die(f"regen failed for: {', '.join(failed)}")
+
+
+# ─── update ──────────────────────────────────────────────────────────────────
+
+def update_version(pkg: LocalPackage, wanted: str | None) -> tuple[str | None, str | None]:
+    """(version to update to, or None; why not). A compat package stays in its series."""
+    if not pkg.version:
+        return None, f"no spec yet; 'rust-deps regen {pkg.crate}' generates one"
+    series = f"^{pkg.version}" if pkg.compat else "*"
+    if wanted:
+        if not any(v["num"] == wanted for v in crate_versions(pkg.crate)):
+            return None, f"{wanted} is not on crates.io (or yanked)"
+        if pkg.compat and not req_matches(series, wanted):
+            return None, (f"{wanted} is outside the compat package's series ({series}); "
+                          f"'regen --version {wanted} --no-compat' makes it a regular package")
+    else:
+        v = pick_version(pkg.crate, series)
+        wanted = v and v["num"]
+    if not wanted or wanted == pkg.version:
+        return None, f"already at {pkg.version}" + ("" if wanted else ", the newest release") + (
+            f" matching {series}" if pkg.compat and not wanted else "")
+    if (old := parse_version(pkg.version)) and (new := parse_version(wanted)) and new < old:
+        return None, f"{wanted} is older than {pkg.version}; 'regen --version {wanted}' downgrades"
+    return wanted, None
+
+
+def repin_upstream_sources(pkg: LocalPackage, old_sha: str | None, new_sha: str | None) -> list[str]:
+    """Point the extra sources taken from upstream git at the new release's commit.
+
+    Returns the moved URLs that do not exist at the new commit.
+    """
+    text = pkg.config_file.read_text()
+    if not old_sha or old_sha not in text:
+        return []
+    if not new_sha:
+        action(f"{pkg.crate}: rust2rpm.toml takes sources from upstream commit {old_sha[:12]}, and the new "
+               "release has no VCS info: point them at the release's commit by hand")
+        return []
+    if old_sha == new_sha:
+        return []
+    pkg.config_file.write_text(text.replace(old_sha, new_sha))
+    info(f"   rust2rpm.toml: upstream sources moved from commit {old_sha[:12]} to {new_sha[:12]}")
+    sources = tomllib.loads(pkg.config_file.read_text()).get("package", {}).get("extra-sources", [])
+    return [s["file"] for s in sources if new_sha in s.get("file", "") and not url_exists(s["file"])]
+
+
+def edits_drift(toml: dict, edits: dict, suggested: dict) -> tuple[list[str], list[str]]:
+    """(edits the new Cargo.toml needs that cargo-toml-edits.toml lacks, entries that name nothing in it)."""
+    deps = {d["name"] for d in manifest_deps(toml)}
+    present = {"drop-dev-dependencies": deps, "drop-dependencies": deps,
+               "drop-features": set(toml.get("features", {}))}
+    kept = {*edits.get("set-version", {}), *edits.get("set-dev-version", {}), *edits.get("add-dev-dependencies", {})}
+    new = [f"{k}: {n}" for k in present for n in suggested.get(k, []) if n not in edits.get(k, []) and n not in kept]
+    stale = [f"{k}: {n}" for k, names in present.items() for n in edits.get(k, []) if n not in names]
+    return new, stale
+
+
+def broken_dependents(updated: dict[str, str], root: Path) -> list[str]:
+    """Local packages (not updated) whose crate requires an updated crate at a version it no longer has."""
+    out = []
+    for p in local_packages(root).values():
+        if p.crate in updated or not p.crate_file or not p.crate_file.exists():
+            continue
+        text = read_crate_member(p.crate_file, "Cargo.toml")
+        for d in manifest_deps(tomllib.loads(apply_edits(text, load_edits(p.edits_file)))):
+            v = updated.get(d["crate_id"])
+            if v and not is_foreign(d["target"]) and not req_matches(d["req"], v):
+                out.append(f"{p.crate} {p.version} needs {d['crate_id']} {d['req']} ({d['kind']})")
+    return sorted(set(out))
+
+
+def cmd_update(args) -> None:
+    pkgs = select(args.root, args.crates, args.all)
+    forget_crate_versions(p.crate for p in pkgs)
+    plan = []
+    for pkg in pkgs:
+        version, why = update_version(pkg, args.version)
+        if version:
+            plan.append((pkg, version))
+        elif args.version or args.crates:
+            info(f"== {pkg.crate}: {why}")
+    if not plan:
+        info("nothing to update")
+        return
+    order = [p.crate for stage in build_stages([p for p, _ in plan], args.root, warn_outside=False) for p in stage]
+    plan.sort(key=lambda item: order.index(item[0].crate))
+    info("Updates, in build order: " + ", ".join(f"{p.crate} {p.version} -> {v}" for p, v in plan))
+    if args.dry_run:
+        return
+    fedora = fedora_index(args.refresh, args.target)
+    updated, failed = {}, []
+    for pkg, version in plan:
+        info(f"== {pkg.crate} {pkg.version} -> {version}")
+        with tempfile.TemporaryDirectory() as tmp:
+            old_crate = (pkg.crate_file if pkg.crate_file.exists()
+                         else download_crate(pkg.crate, pkg.version, Path(tmp)))
+            old_sha = vcs_commit(old_crate)
+        new_crate = download_crate(pkg.crate, version, pkg.dir)
+        missing = repin_upstream_sources(pkg, old_sha, vcs_commit(new_crate))
+        for url in missing:
+            action(f"{pkg.crate}: {url} does not exist at the new commit; fix it in rust2rpm.toml")
+        if ships_license(new_crate) and tomllib.loads(pkg.config_file.read_text()).get("package", {}).get(
+                "extra-sources"):
+            action(f"{pkg.crate}: {version} ships its license text; drop the license extra-sources, "
+                   "license-files and [scripts.prep] copy from rust2rpm.toml if they were only for that")
+        if missing or not regen(pkg, version):
+            failed.append(pkg.crate)
+            continue
+        pkg = local_packages(args.root)[pkg.crate]
+        updated[pkg.crate] = version
+        toml = tomllib.loads(read_crate_member(pkg.crate_file, "Cargo.toml"))
+        suggested, notes = suggest_edits(toml, fedora, local_packages(args.root))
+        new, stale = edits_drift(toml, load_edits(pkg.edits_file), suggested)
+        if new:
+            action(f"{pkg.crate}: {version} needs edits missing from {EDITS_FILE}: {'; '.join(new)}")
+        if stale:
+            action(f"{pkg.crate}: {EDITS_FILE} names what {version} no longer has: {'; '.join(stale)}; "
+                   "remove them, and their comments in rust2rpm.toml")
+        for n in notes:
+            if n.startswith("required dependencies are not packaged"):
+                action(f"{pkg.crate}: {n}")
+        if not args.no_trial and not trial(pkg, discover=False):
+            action(f"{pkg.crate}: the tests fail at {version}; 'rust-deps trial --discover {pkg.crate}' "
+                   "suggests a new [tests] table")
+            failed.append(pkg.crate)
+    for line in broken_dependents(updated, args.root):
+        action(f"{line}: it does not accept the update; update it too, or patch its requirement")
+    if updated:
+        names = " ".join(updated)
+        info(f"\nUpdated: {', '.join(f'{c} {v}' for c, v in updated.items())}")
+        info(f"Next: rust-deps srpm {names}; rust-deps check-targets {names} -r <chroot>; then copr or mock-chain")
+        if adopted := [c for c in updated if local_packages(args.root)[c].dist_git is not None]:
+            info(f"In Fedora: 'rust-deps dist-git {' '.join(adopted)}' prepares the dist-git updates")
+    if failed:
+        die(f"update incomplete for: {', '.join(dict.fromkeys(failed))}")
 
 
 # ─── tmt tests (Fedora CI) ───────────────────────────────────────────────────
@@ -3881,6 +4032,8 @@ def cmd_status(args) -> None:
         chroot = release_chroot(t)
         releases.setdefault(chroot_release(chroot), fedora_index(args.refresh, chroot))
     pkgs = select(args.root, args.crates, args.all or not args.crates)
+    if args.refresh:
+        forget_crate_versions(p.crate for p in pkgs)
     show_targets = any(p.limited for p in pkgs)
     rows = [("crate", "packaged", "crates.io", *releases, *(["for"] if show_targets else []), "patch", "srpm")]
     for pkg in pkgs:
@@ -3899,7 +4052,8 @@ def cmd_status(args) -> None:
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
         info("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
-    info("\n* = newer version on crates.io ('rust-deps regen --latest <crate>' to update)")
+    info("\n* = newer version on crates.io ('rust-deps update <crate>' to update; --refresh "
+         "for a release of the last day)")
     info("= : the version packaged here; (+N): N older versions as well" + ("" if args.all_versions else
          " (--all-versions lists them)"))
     if show_targets:
@@ -4000,6 +4154,18 @@ def main() -> None:
                    help="make it a compat package (rust-<crate><major.minor>); kept on later regens")
     g.add_argument("--no-compat", dest="compat", action="store_false", help="make it a regular package again")
     sp.set_defaults(func=cmd_regen)
+
+    sp = sub.add_parser("update", help="update packages to a new upstream release: regen, move upstream "
+                        "sources to the release's commit, check edits and dependents, trial")
+    with_sel(sp)
+    sp.add_argument("--version", help="update to this release (default: the newest; for a compat package, "
+                    "the newest of its series)")
+    sp.add_argument("--no-trial", action="store_true", help="skip running the spec's tests with cargo")
+    sp.add_argument("-n", "--dry-run", action="store_true", help="only show the updates, in build order")
+    sp.add_argument("-r", "--chroot", dest="target", metavar="CHROOT",
+                    help="check the edits against this COPR/mock chroot's crates instead of the host's")
+    sp.add_argument("--refresh", action="store_true", help="refresh the cached Fedora crate list")
+    sp.set_defaults(func=cmd_update)
 
     sp = sub.add_parser("trial", help="cargo test the patched crate like %%check would")
     with_sel(sp)
@@ -4148,7 +4314,7 @@ def main() -> None:
                          "fedora-44, fedora-rawhide, rhel+epel-10 (COPR's EPEL), epel-10, fedora-44-x86_64")
     sp.add_argument("--project", metavar="P", help="a column for each release of this COPR project's chroots")
     sp.add_argument("--all-versions", action="store_true", help="list every version a release has")
-    sp.add_argument("--refresh", action="store_true")
+    sp.add_argument("--refresh", action="store_true", help="refresh the cached Fedora and crates.io data")
     sp.set_defaults(func=cmd_status)
 
     args = p.parse_args()

@@ -98,6 +98,7 @@ rust-deps dist-git --dir ~/src/fedora zmij   # an update of a Fedora package, co
 rust-deps review-request --all --project username/repo --fas username   # drafts; --file files them
 rust-deps review-status --all                   # reviewer comments, next steps
 rust-deps status --project username/repo        # packaged vs. crates.io vs. each Fedora/EPEL release
+rust-deps update native-ossl-sys native-ossl --version 0.3.1   # to a new upstream release, in build order
 rust-deps review-status --user username              # all your review tickets, tracked in ~/.cache
 ```
 

@@ -130,6 +130,7 @@ hold:
 | `resolve CRATE[@REQ]… [--manifest Cargo.toml] [--local-root DIR]… [-r CHROOT] [--json]` | Recursively list crates to package. **NEW** = not in Fedora. **UPDATE** = Fedora has other versions. **FEATURES** = Fedora's package lacks a requested feature. Also lists optional and dev dependencies that Fedora lacks. With `-r CHROOT`, checks against that COPR/mock target's crates (e.g. `fedora-44-x86_64`, `rhel+epel-10-x86_64`) instead of the host's. |
 | `init CRATE[@REQ]… [--recursive] [--force] [--no-trial] [--apply-tests] [-r CHROOT] [--compat]` | Create packages: drafts `cargo-toml-edits.toml`, `rust2rpm.toml` (patch comments, license sources) and the spec, then runs test discovery. Skips packages that already exist unless `--force` (which overwrites both files). `-r CHROOT` decides what is missing against that target, as for `resolve`, and limits a package the host's Fedora already ships to that target (`targets.toml`). `--compat` creates compat packages (see "Compat packages"). |
 | `regen CRATE…\|--all [--latest\|--version V\|--crate-file PATH] [--compat\|--no-compat]` | Regenerate spec and patches with rust2rpm, non-interactively. With `--latest` it updates the package to the newest release. With `--crate-file` (one crate only) it uses a local `.crate`, e.g. `cargo package` output of a version not yet on crates.io, and copies it into the package directory. `--compat` turns the package into a compat package, `--no-compat` back; otherwise a compat package stays one. The spec it replaces and its SRPMs are removed. |
+| `update CRATE…\|--all [--version V] [--no-trial] [-n] [-r CHROOT]` | Update packages to a new upstream release: to `--version V`, else the newest one (a compat package: the newest of its series). It asks crates.io anew, so a release of the last hour counts. It updates the packages in build order, moves the extra sources that `rust2rpm.toml` takes from upstream git (e.g. a license text) from the old release's commit to the new one's, regenerates, and runs `trial`. It reports edits the new version needs that `cargo-toml-edits.toml` lacks, edits that name what the new version no longer has, required dependencies Fedora lacks, a license text the new release now ships, and local packages whose crate does not accept the new version. `-n` only lists the updates. |
 | `trial CRATE…\|--all [--discover [--apply]] [--timeout S] [--online]` | Build and test the patched crate with cargo. Like mock, tests run without network access (`unshare -rn`, after `cargo fetch`) unless `--online` is given; as in mock, the loopback interface is up, so tests using `127.0.0.1` work. Plain `trial` runs exactly the `%cargo_test` calls of the spec. `--discover` tries every test target and prints a `[tests]` table (a target whose `required-features` are off is reported as skipped, as `%cargo_test` skips it too); `--apply` writes it, regenerates and re-checks (logging to `<crate>.recheck.log`, so the discovery log `<crate>.log` survives). |
 | `srpm CRATE…\|--all [--no-prep]` | Run `spectool -g` and `rpmbuild -bs`, then `rpmbuild -bp` (patches apply, license copy works) and `rpmlint`. |
 | `order CRATE…\|--all [--json]` | Print build stages. Each stage depends only on earlier stages and on Fedora. Stages come from the BuildRequires rust2rpm generates, so a dev-dependency counts only when `%check` runs: a crate whose tests need its own dependent (as `synta` with `synta-certificate`) builds first once those tests are off. |
@@ -703,16 +704,20 @@ a regular `LICENSE` file (not a symlink) in the crate directory, and drop the
 ## Updating packages
 
 ```
-$T status                       # '*' marks newer releases on crates.io
-$T regen --latest fancy-regex   # edits are re-applied to the new version
-$T trial --discover fancy-regex # did the test situation change?
-$T srpm fancy-regex
+$T status --refresh                         # '*' marks newer releases on crates.io
+$T update native-ossl-sys native-ossl ring-native-ossl rustls-native-ossl --version 0.3.1
+$T srpm native-ossl-sys native-ossl ring-native-ossl rustls-native-ossl
 ```
 
-If an edit no longer matches (e.g. upstream removed a dev-dependency), it is
-silently ignored. `regen` warns only when none of the edits change anything.
-After an update, check `<crate>-fix-metadata.diff`, then remove stale entries
-from `cargo-toml-edits.toml` and the matching comments from `rust2rpm.toml`.
+`update` does what a version update needs besides `regen --version`: it
+takes the packages in build order (a `-sys` crate before the crates that use
+it), moves `extra-sources` pinned to the old release's upstream commit to the
+new release's commit, and runs the spec's tests. Edits are re-applied to the
+new version; one that no longer matches (e.g. upstream removed a
+dev-dependency) changes nothing, and `update` names it: remove it from
+`cargo-toml-edits.toml` and its comment from `rust2rpm.toml`. When the tests
+fail, `trial --discover <crate>` suggests a new `[tests]` table. For an
+adopted package, `dist-git` then prepares the Fedora update.
 
 ## Limits
 
