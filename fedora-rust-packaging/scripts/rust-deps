@@ -42,6 +42,7 @@ import urllib.request
 import xmlrpc.client
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 try:
     from cargo2rpm.semver import Version, VersionReq
@@ -4130,9 +4131,10 @@ def cmd_doctor(args) -> None:
 # ─── TUI ─────────────────────────────────────────────────────────────────────
 # 'rust-deps tui' presents the whole workflow in a text UI (python3-textual).
 # Its home screen is an Overview: the state of the packages under the root and
-# the next steps it implies, each jumping to the command with the crates
-# picked.  Forms are generated from the same argparse parser as the command
-# line, so the UI cannot drift from it; the parser's structure decides the
+# the next steps implied by the package lifecycle graph (TUI_STAGES), each
+# jumping to the command with the crates picked.  Forms are generated from the
+# same argparse parser as the command line, so the UI cannot drift from it; the
+# parser's structure decides the
 # widget (crate picker, mode choice for exclusive groups, rows for repeatable
 # options, Run gated on required arguments).  Each command runs as a
 # 'rust-deps' subprocess whose output streams into the view: block headers and
@@ -4269,17 +4271,57 @@ def has_tests(pkg: LocalPackage) -> bool:
     return "[tests]" in (pkg.config_file.read_text() if pkg.config_file.exists() else "")
 
 
+@dataclass
+class TuiStage:
+    """One position of a package on the lifecycle graph: 'detect' is local file
+    state, 'edges' are the commands that move a package out of this stage
+    (command, flag field keys to pre-check, why)."""
+    name: str
+    detect: Callable[[LocalPackage], bool]
+    edges: list[tuple[str, list[str], str]]
+
+
+# The Quick start pipeline as data.  First matching stage wins, so a package is
+# suggested exactly the work that comes next for it; the build line (spec,
+# tests, SRPM) is shared, and after it the tree branches: adopted packages go
+# on to dist-git, target-limited ones to COPR, everything else onto the review
+# line (review-plan → draft → filed).  The 'tests?' stage expands into the
+# discovery chain that tui_trial_actions derives from a trial run's output.
+TUI_STAGES = [
+    TuiStage("spec?", lambda p: not p.version,
+             [("regen", [], "no generated spec for these packages")]),
+    TuiStage("tests?", lambda p: not has_tests(p),
+             [("trial", ["discover"],
+               "no [tests] in rust2rpm.toml: trial --discover picks what can run")]),
+    TuiStage("srpm?", lambda p: not has_srpm(p),
+             [("srpm", [], "no SRPM built for the current version")]),
+    TuiStage("adopted", lambda p: p.dist_git is not None,
+             [("dist-git", [], "adopted from dist-git: prepare the update commit")]),
+    TuiStage("targets", lambda p: p.targets is not None,
+             [("copr", [], "limited to targets.toml: publish builds for those releases")]),
+    TuiStage("filed", lambda p: (p.dir / REQUEST_STATE).exists(),
+             [("review-status", [], "the ticket is filed: see where it stands")]),
+    TuiStage("draft", lambda p: (p.dir / REQUEST_DRAFT).exists(),
+             [("review-request", ["file"], "the draft is ready: file it on Bugzilla")]),
+    TuiStage("review", lambda p: True,
+             [("review-plan", [], "what to submit for review, in which order")]),
+]
+
+
+def tui_stage(pkg: LocalPackage) -> TuiStage:
+    """Where a package sits on the graph: the first stage whose state matches."""
+    for stage in TUI_STAGES:
+        if stage.detect(pkg):
+            return stage
+    return TUI_STAGES[-1]  # 'review' matches everything
+
+
 def tui_package_rows(root: Path) -> tuple[list[str], list[list[str]]]:
-    """The Overview table: what each package under the root actually has."""
-    headers = ["crate", "version", "spec", "patch", "srpm", "tests", "review", "scope"]
+    """The Overview table: what each package under the root actually has and
+    where it sits on the lifecycle graph."""
+    headers = ["crate", "version", "spec", "patch", "srpm", "tests", "stage", "scope"]
     rows = []
     for pkg in _overview_packages(root):
-        if (pkg.dir / REQUEST_STATE).exists():
-            review = "filed"
-        elif (pkg.dir / REQUEST_DRAFT).exists():
-            review = "draft"
-        else:
-            review = "-"
         rows.append([
             pkg.crate + (" (compat)" if pkg.compat else ""),
             pkg.version or "-",
@@ -4287,7 +4329,7 @@ def tui_package_rows(root: Path) -> tuple[list[str], list[list[str]]]:
             "yes" if (pkg.dir / f"{pkg.crate}-fix-metadata.diff").exists() else "-",
             "yes" if has_srpm(pkg) else "-",
             "yes" if has_tests(pkg) else "-",
-            review,
+            tui_stage(pkg).name,
             pkg.scope,
         ])
     return headers, rows
@@ -4296,25 +4338,24 @@ def tui_package_rows(root: Path) -> tuple[list[str], list[list[str]]]:
 def tui_suggestions(root: Path) -> list[tuple[str, list[str], list[str], str]]:
     """Next steps implied by the tree state: (command, crates to preselect,
     flag field keys to pre-check, why).
-    Mirrors the Quick start order of the manual; everything here is local."""
+    Derived from the lifecycle graph: every package is placed on a stage, and
+    each reached stage yields its edges with those crates picked.  Everything
+    here is local."""
     pkgs = _overview_packages(root)
     if not pkgs:
         return [("resolve", [], [], "nothing under this root yet: find the crates a project needs"),
                 ("init", [], [], "or create packages directly")]
+    at: dict[str, list[str]] = {}
+    for p in pkgs:
+        at.setdefault(tui_stage(p).name, []).append(p.crate)
     out: list[tuple[str, list[str], list[str], str]] = []
-    no_spec = [p.crate for p in pkgs if not p.version]
-    no_tests = [p.crate for p in pkgs if p.version and not has_tests(p)]
-    no_srpm = [p.crate for p in pkgs if p.version and not has_srpm(p)]
-    built = [p.crate for p in pkgs if has_srpm(p)]
-    if no_spec:
-        out.append(("regen", no_spec, [], "no generated spec for these packages"))
-    if no_tests:
-        out.append(("trial", no_tests, ["discover"],
-                    "no [tests] in rust2rpm.toml: trial --discover picks what can run"))
-    if no_srpm:
-        out.append(("srpm", no_srpm, [], "no SRPM built for the current version"))
-    if built:
-        out.append(("review-plan", built, [], "what to submit for review, in which order"))
+    for stage in TUI_STAGES:
+        crates = at.get(stage.name)
+        if not crates:
+            continue
+        for cmd, flags, why in stage.edges:
+            out.append((cmd, crates, flags, f"{stage.name}: {why}"))
+    if any(has_srpm(p) for p in pkgs):
         out.append(("status", [], [], "packaged vs. crates.io vs. the Fedora releases"))
     return out
 
