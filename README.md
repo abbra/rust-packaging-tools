@@ -18,8 +18,10 @@ rust-packaging-tools/
 ├── install.sh                     installs the skill and/or the command
 └── fedora-rust-packaging/         the skill (self-contained, location independent)
     ├── SKILL.md                   instructions for agents
-    ├── scripts/rust-deps          the tool (Python 3.12+, no extra modules beyond rust2rpm and
-    │                              python3-bugzilla; 'tui' additionally uses python3-textual)
+    ├── scripts/rust-deps          the tool's launcher: runs the package next to it
+    │                              straight from a checkout, no installation needed
+    ├── scripts/rust_deps/         the tool as components (Python 3.12+, no extra modules beyond
+    │                              rust2rpm and python3-bugzilla; 'tui' uses python3-textual)
     └── references/MANUAL.md       the manual: workflow, file formats, fixes
 ```
 

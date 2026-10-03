@@ -4,15 +4,17 @@ description: Package Rust crates for Fedora with rust2rpm, including every depen
 compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
 argument-hint: "<crate>[@ver]… | --manifest <Cargo.toml> | <rust-deps command> [args] [--root <dir>]"
 metadata:
-  version: "1.16"
+  version: "1.17"
 ---
 
 # Fedora Rust crate packaging
 
 All work goes through `scripts/rust-deps`, a CLI in this skill's directory; run
-it with its full path. `references/MANUAL.md` is the complete manual. Read it
-before the first use, for the file formats and the table of fixes for each
-`ACTION NEEDED` message.
+it with its full path. It is a launcher for the `scripts/rust_deps/` package
+next to it (one module per command domain), so it works straight from this
+directory with nothing installed. `references/MANUAL.md` is the complete manual.
+Read it before the first use, for the file formats and the table of fixes for
+each `ACTION NEEDED` message.
 
 The skill directory comes from the harness:
 
