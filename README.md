@@ -18,7 +18,8 @@ rust-packaging-tools/
 ├── install.sh                     installs the skill and/or the command
 └── fedora-rust-packaging/         the skill (self-contained, location independent)
     ├── SKILL.md                   instructions for agents
-    ├── scripts/rust-deps          the tool (Python 3.12+, no extra modules beyond rust2rpm and python3-bugzilla)
+    ├── scripts/rust-deps          the tool (Python 3.12+, no extra modules beyond rust2rpm and
+    │                              python3-bugzilla; 'tui' additionally uses python3-textual)
     └── references/MANUAL.md       the manual: workflow, file formats, fixes
 ```
 
@@ -70,7 +71,7 @@ allows to have easy environments for each Fedora release.
 Expected packages to be installed:
 ```
 sudo dnf install python3 rust2rpm cargo rpm-build rpmdevtools rpmlint dnf5 patch util-linux iproute
-# optional: mock, fedora-review (plus 'sudo usermod -aG mock $USER'), copr-cli
+# optional: mock, fedora-review (plus 'sudo usermod -aG mock $USER'), copr-cli, python3-textual (for 'tui')
 ```
 
 `rust2rpm` provides the `python3-cargo2rpm` module that `rust-deps` uses for
@@ -101,7 +102,37 @@ rust-deps review-status --all                   # reviewer comments, next steps
 rust-deps status --project username/repo        # packaged vs. crates.io vs. each Fedora/EPEL release
 rust-deps update native-ossl-sys native-ossl --version 0.3.1   # to a new upstream release, in build order
 rust-deps review-status --user username              # all your review tickets, tracked in ~/.cache
+rust-deps tui                                        # all of the above in a text UI (python3-textual)
 ```
+
+`rust-deps tui` opens the whole tool in a terminal UI (built with
+[Textual](https://github.com/Textualize/textual)): a sidebar lists every
+command in workflow order, and it opens on an **Overview**: the state of every
+package under the root (spec, patch, SRPM, tests table, review draft, scope)
+and the next steps that state implies — selecting one jumps to that command
+with the right crates already picked. The Overview refreshes after every run.
+The form for the selected command is built from the same argparse metadata as
+`--help` (so the UI and the command line can never drift apart), rendered as
+what the parser says it is, in two panes side by side: the crate selection is
+a list of checkboxes over the packages under `--root` plus a field for new
+`CRATE[@REQ]` names on the left, every option a readable row of its own on the
+right (flags with a short form of their `--help` inline), so a long crate list
+never hides the options;
+mutually exclusive options (`regen --latest/--version/--crate-file`,
+`--compat/--no-compat`) are one mode choice, repeatable options (`-r`,
+`--manifest`, `--koji-task`, …) are add/remove rows, and required arguments
+gate the Run button. The exact `rust-deps …` command line is shown live as
+you fill the form. Output streams into the view — diagnostics colored,
+`status`, `doctor`, `trial` and any `--json` result rendered as tables.
+Results feed back into the UI: a `trial` run becomes a verdict table (crate,
+target, status, summary, first error) with next steps under it, following the
+discovery workflow: plain failures go to `--discover`, a suggested `[tests]`
+table goes to `--discover --apply` (write, regenerate, recheck), a passing
+recheck goes to `regen` after the TODO reasons are filled in, and passing
+crates go to `srpm` — selecting one reopens that command with the crates
+already picked and the suggested flags set. Keys:
+arrows/enter pick a command or a suggested next step, `tab` moves through the
+form, `ctrl+r` runs, `escape` cancels, `ctrl+q` quits.
 
 The full workflow and reference is in
 [`fedora-rust-packaging/references/MANUAL.md`](fedora-rust-packaging/references/MANUAL.md).
