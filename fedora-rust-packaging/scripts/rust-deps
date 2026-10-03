@@ -4139,8 +4139,10 @@ def cmd_doctor(args) -> None:
 # options, Run gated on required arguments).  Each command runs as a
 # 'rust-deps' subprocess whose output streams into the view: block headers and
 # verdict words are colored, and 'status', 'doctor', 'trial', 'srpm' and any
-# '--json' result are additionally rendered as tables.  The Textual APIs used
-# here exist unchanged
+# '--json' result are additionally rendered as tables.  Where a tool proposes
+# next steps in its own output (a quoted 'run 'review' first' or a full
+# 'rust-deps …' line), tui_suggested_actions turns them into jumps under the
+# result.  The Textual APIs used here exist unchanged
 # in Textual 4 (Fedora 44) and Textual 8.
 
 TUI_SECTIONS = [
@@ -4471,6 +4473,86 @@ def parse_srpm_output(lines: list[str]) -> list[dict]:
         r["prep"] = r["prep"] or ("skipped" if r["rpmlint"] else "FAILED")
         r["rpmlint"] = r["rpmlint"] or "FAILED"
     return rows
+
+
+# Blocks that name the package a suggestion belongs to: review-plan's numbered
+# steps, review-status' and srpm's '== pkg' headers, copr-status' 'crate evr:'
+# lines; tree-level bullets and stage headers clear the context.
+_SUGGEST_STEP_RE = re.compile(r"^\s*\d+\. (\S+) (\S+)\s+(?:FILED|READY|NOT READY|update)$")
+_SUGGEST_BLOCK_RE = re.compile(r"^== ([^\s:]+)(?::| \S+)")
+_SUGGEST_COPR_RE = re.compile(r"^(\S+) (\S+): (?:build \S+|no COPR build of this version)$")
+_SUGGEST_RESET_RE = re.compile(r"^(?:- |summary:|Submit in this order|=== stage|no review needed:|other specs)")
+_SUGGEST_QUOTED_RE = re.compile(r"'([^']{1,120})'")
+_SUGGEST_LINE_RE = re.compile(r"rust-deps(?: --root \S+)? ([a-z][a-z-]+)(.*)")
+
+
+def tui_suggested_actions(lines: list[str], root: Path,
+                         commands: dict) -> list[tuple[str, list[str], list[str], str]]:
+    """Steps the tools themselves propose in their output, as jumpable actions.
+
+    A proposal is a quoted command ('review', 'copr --wait', 'adopt crate') or a
+    full 'rust-deps …' line.  Crates are the ones named in the line (resolved
+    against the tree), else the package block the proposal sits in; option
+    values and placeholders are skipped.  The tool's own wording is kept as the why.
+    """
+    crates_of: dict[str, str] = {}
+    for p in local_packages(root).values():
+        crates_of[p.crate] = p.crate
+        crates_of[p.rpm_name] = p.crate
+
+    def args_of(cmd: str, tokens: list[str]) -> tuple[list[str], list[str]]:
+        flags: list[str] = []
+        picked: list[str] = []
+        opts = {o: f for f in commands[cmd][1] for o in f.options}
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
+            if t in opts:
+                if opts[t].kind == "flag":
+                    flags.append(opts[t].key)
+                else:
+                    i += 1  # skip the option's value
+            elif t in crates_of:
+                picked.append(crates_of[t])
+            i += 1
+        return flags, picked
+
+    out: list[tuple[str, list[str], list[str], str]] = []
+    seen: set[tuple] = set()
+    ctx: list[str] = []
+
+    def add(cmd: str, crates: list[str], flags: list[str], why: str) -> None:
+        key = (cmd, tuple(crates), tuple(flags))
+        if key not in seen:
+            seen.add(key)
+            out.append((cmd, crates, flags, why))
+
+    for line in lines:
+        if m := _SUGGEST_STEP_RE.match(line):
+            head = m.group(1)
+        elif m := _SUGGEST_BLOCK_RE.match(line):
+            head = m.group(1)
+        elif m := _SUGGEST_COPR_RE.match(line):
+            head = m.group(1)
+        elif _SUGGEST_RESET_RE.match(line):
+            head, ctx = "", []
+        else:
+            head = ""
+        if head:
+            ctx = [crates_of[head]] if head in crates_of else []
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for m in _SUGGEST_LINE_RE.finditer(line):
+            if m.group(1) in commands:
+                flags, picked = args_of(m.group(1), m.group(2).split())
+                add(m.group(1), picked, flags, stripped)
+        for m in _SUGGEST_QUOTED_RE.finditer(line):
+            tokens = m.group(1).split()
+            if tokens and tokens[0] in commands:
+                flags, picked = args_of(tokens[0], tokens[1:])
+                add(tokens[0], picked or list(ctx), flags, stripped)
+    return out
 
 
 def tui_argv(fields: list[TuiField], values: dict) -> list[str]:
@@ -5064,20 +5146,29 @@ def make_tui_app() -> type:
                     parsed = (["crate", "version", "srpm", "%prep", "rpmlint"],
                               [[r["crate"], r["version"], r["srpm"], r["prep"],
                                 r["rpmlint"]] for r in srpm_rows])
+            # steps the tools propose in their own wording become jumps too
+            known = {(a[0], tuple(a[1]), tuple(a[2])) for a in actions}
+            for a in tui_suggested_actions(self._stdout, self.root, commands):
+                if (a[0], tuple(a[1]), tuple(a[2])) not in known:
+                    known.add((a[0], tuple(a[1]), tuple(a[2])))
+                    actions.append(a)
             self._result_actions = actions
             self._fill_actions(self.query_one("#result-actions", OptionList), actions)
             self.query_one("#result-actions-label", Label).update(
                 "next steps from this run (select to jump)" if actions else "")
-            if parsed is None:  # nothing table-shaped: the output is in the Log view
+            if parsed is not None:
+                headers, rows = parsed
+                table = self.query_one("#result-table", DataTable)
+                table.clear()
+                table.add_columns(*headers)
+                for row in rows:
+                    table.add_row(*row)
+                table.cursor_type = "row"
+            elif actions:  # only the proposed steps are worth a pane of their own
+                self.query_one("#result-table", DataTable).clear()
+            else:  # nothing structured: the output is in the Log view
                 self.query_one("#tabs", Tabs).active = "log"
                 return
-            headers, rows = parsed
-            table = self.query_one("#result-table", DataTable)
-            table.clear()
-            table.add_columns(*headers)
-            for row in rows:
-                table.add_row(*row)
-            table.cursor_type = "row"
             self.query_one("#tabs", Tabs).active = "table"
 
         def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
