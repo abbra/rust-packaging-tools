@@ -133,7 +133,10 @@ discovery workflow: plain failures go to `--discover`, a suggested `[tests]`
 table goes to `--discover --apply` (write, regenerate, recheck), a passing
 recheck goes to `regen` after the TODO reasons are filled in, and passing
 crates go to `srpm` — selecting one reopens that command with the crates
-already picked and the suggested flags set. Keys:
+already picked and the suggested flags set. The same applies to what any
+other command proposes in its own output: review-plan's `run 'review' first`
+on a NOT READY package, review-status' `next:` lines, and copr-status'
+resubmit command all become jumps with the right crates picked. Keys:
 arrows/enter pick a command or a suggested next step, `tab` moves through the
 form, `ctrl+r` runs, `escape` cancels, `ctrl+q` quits.
 
