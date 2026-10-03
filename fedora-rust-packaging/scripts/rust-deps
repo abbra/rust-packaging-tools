@@ -1130,6 +1130,9 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
     """
     compat = pkg.compat if compat is None else compat
     edits = load_edits(pkg.edits_file)
+    cfg = tomllib.loads(pkg.config_file.read_text())
+    _BUILD_INFO.pop((str(pkg.dir), pkg.version), None)  # the spec and Cargo.toml change here
+    _BUILD_INFO.pop((str(pkg.dir), version), None)
     if local_crate:
         # rust2rpm --path does not store the crate; trial and srpm need it here
         if local_crate.resolve() != (pkg.dir / local_crate.name).resolve():
@@ -1144,13 +1147,11 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         env["EDITOR"] = str(Path(__file__).resolve())
         env[EDITOR_ENV] = str(pkg.edits_file)
         mode = ["-p"]
-        cfg = tomllib.loads(pkg.config_file.read_text())
         if not cfg.get("package", {}).get("cargo-toml-patch-comments"):
             action(f"{pkg.crate}: {EDITS_FILE} has edits but rust2rpm.toml has no cargo-toml-patch-comments")
     else:
         env["EDITOR"] = "false"
         mode = ["-r"]  # re-apply a hand-made <crate>-fix-metadata.diff if there is one
-        cfg = tomllib.loads(pkg.config_file.read_text())
         if manual.exists() and not cfg.get("package", {}).get("cargo-toml-patch-comments"):
             action(f"{pkg.crate}: {manual.name} is applied, but {EDITS_FILE} is empty and rust2rpm.toml has "
                    "no cargo-toml-patch-comments; if it is left from earlier edits, delete it and regen")
@@ -1172,7 +1173,7 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         action(f"{pkg.crate}: generated Summary is too long; set package.summary in rust2rpm.toml and regen")
     if edits and not manual.exists():
         warn(f"{pkg.crate}: {EDITS_FILE} produced no changes to Cargo.toml")
-    comments = tomllib.loads(pkg.config_file.read_text()).get("package", {}).get("cargo-toml-patch-comments", [])
+    comments = cfg.get("package", {}).get("cargo-toml-patch-comments", [])
     if (manual.exists() and "unexpected_cfgs" in manual.read_text()
             and not any("unexpected_cfgs" in c or "cfg value" in c for c in comments)):
         action(f"{pkg.crate}: the patch declares the dropped features as expected cfg values; add to "
@@ -1207,11 +1208,11 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
         for old in pkg.dir.glob(f"{pkg.crate}-*.crate"):
             if old.name != f"{pkg.crate}-{new.version}.crate":
                 old.unlink()
-        requires = tomllib.loads(pkg.config_file.read_text()).get("requires", {})
+        requires = cfg.get("requires", {})
         if new.crate_file.exists() and not (requires.get("build") or requires.get("lib")):
             if hint := sys_hint(tomllib.loads(read_crate_member(new.crate_file, "Cargo.toml"))):
                 action(f"{pkg.crate}: {hint}")
-        if shebangs := foreign_shebangs(new.crate_file, tomllib.loads(pkg.config_file.read_text())):
+        if shebangs := foreign_shebangs(new.crate_file, cfg):
             listing = ", ".join(f"{f} (#!{i})" for f, i in shebangs)
             action(f"{pkg.crate}: executable files with an interpreter outside /usr/bin: {listing}; rpm makes "
                    "-devel require that interpreter, which no package provides. Remove them or drop their "
