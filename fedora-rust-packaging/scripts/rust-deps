@@ -4282,6 +4282,40 @@ def has_tests(pkg: LocalPackage) -> bool:
     return "[tests]" in (pkg.config_file.read_text() if pkg.config_file.exists() else "")
 
 
+_TESTS_SECTION_RE = re.compile(r"(?ms)^\[tests\]\n.*?(?=^\[|\Z)")
+_COMMENTS_ARRAY_RE = re.compile(r"(?ms)^comments = (?:\[\]|\[.*?^\])")
+_TOML_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def tests_table_comments(text: str) -> list[str]:
+    """The comments entries of a rust2rpm.toml [tests] table, TOML-decoded."""
+    m = _TESTS_SECTION_RE.search(text)
+    if not m or not (am := _COMMENTS_ARRAY_RE.search(m.group(0))):
+        return []
+    return [json.loads(s) for s in _TOML_STRING_RE.findall(am.group(0))]
+
+
+def replace_tests_comments(text: str, comments: list[str]) -> str:
+    """Rewrite only the comments array of the [tests] table; the rest of the
+    file, and the rest of the table, stays exactly as it is."""
+    sm = _TESTS_SECTION_RE.search(text)
+    if not sm:
+        return text
+    section = _COMMENTS_ARRAY_RE.sub(lambda _: "comments = " + toml_list(comments),
+                                     sm.group(0), count=1)
+    return text[:sm.start()] + section + text[sm.end():]
+
+
+def has_tests_todo(pkg: LocalPackage) -> bool:
+    """A [tests] table whose reasons are still the TODO placeholders 'trial --apply' wrote."""
+    return pkg.config_file.exists() and any(
+        "TODO" in c for c in tests_table_comments(pkg.config_file.read_text()))
+
+
+def tests_todo_crates(root: Path) -> list[str]:
+    return sorted(p.crate for p in local_packages(root).values() if has_tests_todo(p))
+
+
 @dataclass
 class TuiStage:
     """One position of a package on the lifecycle graph: 'detect' is local file
@@ -4304,6 +4338,8 @@ TUI_STAGES = [
     TuiStage("tests?", lambda p: not has_tests(p),
              [("trial", ["discover"],
                "no [tests] in rust2rpm.toml: trial --discover picks what can run")]),
+    TuiStage("tests-todo", has_tests_todo,
+             [("tests-edit", [], "the [tests] table still has TODO reasons: write the real ones")]),
     TuiStage("srpm?", lambda p: not has_srpm(p),
              [("srpm", [], "no SRPM built for the current version")]),
     TuiStage("adopted", lambda p: p.dist_git is not None,
@@ -4855,6 +4891,12 @@ def make_tui_app() -> type:
             #result-table { height: 1fr; }
             #result-actions-label { color: $text-muted; }
             #result-actions { height: auto; max-height: 9; }
+            #tests-edit { width: 1fr; padding: 0 1; }
+            #tests-edit .field-label { color: $text-muted; }
+            #tests-edit-table { height: auto; max-height: 12; }
+            #tests-edit-rows { height: auto; max-height: 14; overflow-y: auto; }
+            #tests-edit-rows Input { width: 100%; }
+            #tests-actions { height: auto; max-height: 8; }
         """
         BINDINGS = [
             ("ctrl+r", "run_command", "Run"),
@@ -4885,6 +4927,8 @@ def make_tui_app() -> type:
             self._tools_ok: dict[str, bool] = {}
             self._suggestions: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
             self._result_actions: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
+            self._tests_actions: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
+            self._edit_inputs: dict[str, list] = {}
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -4919,6 +4963,18 @@ def make_tui_app() -> type:
                                                 cursor_type="row")
                                 yield Label("", id="result-actions-label")
                                 yield OptionList(id="result-actions")
+                    # the one manual step of the lifecycle, made editable in the UI:
+                    # the reasons of a [tests] table 'trial --apply' wrote as TODOs
+                    with Vertical(id="tests-edit"):
+                        yield Label("rust2rpm.toml [tests] reasons", id="tests-edit-title",
+                                    classes="field-label")
+                        yield Static("", id="tests-edit-table")
+                        yield Vertical(id="tests-edit-rows")
+                        with Horizontal(id="tests-edit-bar"):
+                            yield Button("Save reasons", id="tests-save", variant="primary")
+                            yield Button("Back to overview", id="tests-back")
+                        yield Label("after saving (select to jump)", classes="field-label")
+                        yield OptionList(id="tests-actions")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -4938,10 +4994,13 @@ def make_tui_app() -> type:
             self._refresh_overview()
 
         def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-            if event.option_list.id in ("suggestions", "result-actions"):
-                src = (self._suggestions if event.option_list.id == "suggestions"
-                       else self._result_actions)
+            if event.option_list.id in ("suggestions", "result-actions", "tests-actions"):
+                src = {"suggestions": self._suggestions, "result-actions": self._result_actions,
+                       "tests-actions": self._tests_actions}[event.option_list.id]
                 cmd, crates, flags, values, _ = src[event.option_index]
+                if cmd == "tests-edit":
+                    self._open_tests_editor(crates)
+                    return
                 self.query_one("#screens", ContentSwitcher).current = "work"
                 self._show(cmd, prefill=crates, flags=flags, values=values)
             elif event.option_id == "overview":
@@ -4985,6 +5044,71 @@ def make_tui_app() -> type:
                 table.add_row(*row)
             self._suggestions = tui_suggestions(self.root)
             self._fill_actions(self.query_one("#suggestions", OptionList), self._suggestions)
+
+        def _open_tests_editor(self, crates: list[str]) -> None:
+            self._cancel_proc()
+            self._cmd = None
+            self._fields, self._widgets = [], {}
+            self._crate_extra = None
+            self._crate_boxes = {}
+            self.query_one("#run", Button).disabled = True
+            self.query_one("#screens", ContentSwitcher).current = "tests-edit"
+            self._tests_editor = self.run_worker(self._build_tests_editor(crates),
+                                                 exclusive=True, group="form")
+
+        async def _build_tests_editor(self, crates: list[str]) -> None:
+            """Show each TODO comment of the selected packages as an editable row,
+            with the rest of their [tests] tables as read-only context."""
+            self._gen += 1
+            pkgs = local_packages(self.root)
+            rows = self.query_one("#tests-edit-rows", Vertical)
+            await rows.remove_children()
+            context: list[str] = []
+            self._edit_inputs = {}
+            for crate in sorted(crates or tests_todo_crates(self.root)):
+                pkg = pkgs.get(crate)
+                if pkg is None or not pkg.config_file.exists():
+                    continue
+                text = pkg.config_file.read_text()
+                sm = _TESTS_SECTION_RE.search(text)
+                comments = tests_table_comments(text)
+                if not sm or not comments:
+                    continue
+                context.append(f"== {crate}  {pkg.config_file}")
+                for ln in sm.group(0).splitlines():
+                    if ln.startswith("comments"):
+                        break
+                    context.append(ln)
+                inputs = []
+                for i, c in enumerate(comments):
+                    m = re.search(r"explain why (?:these )?(\S+)", c)
+                    label = f"{crate}  {m.group(1)}" if m else f"{crate}  reason {i + 1}"
+                    widget = Input(value=c, id=self._wid(f"te-{crate}-{i}"))
+                    await rows.mount(Label(label, classes="field-label"), widget)
+                    inputs.append(widget)
+                self._edit_inputs[crate] = inputs
+            self.query_one("#tests-edit-table", Static).update("\n".join(context))
+            chosen = list(self._edit_inputs)
+            self._tests_actions = [
+                ("regen", chosen, [], {},
+                 "reasons written: regenerate the spec so they appear in it"),
+                ("srpm", chosen, [], {}, "or continue to the SRPM once the spec is regenerated"),
+            ]
+            self._fill_actions(self.query_one("#tests-actions", OptionList), self._tests_actions)
+
+        def _save_tests_reasons(self) -> None:
+            pkgs = local_packages(self.root)
+            written = []
+            for crate, inputs in self._edit_inputs.items():
+                pkg = pkgs.get(crate)
+                if pkg is None:
+                    continue
+                pkg.config_file.write_text(
+                    replace_tests_comments(pkg.config_file.read_text(), [w.value for w in inputs]))
+                written.append(crate)
+            self._refresh_overview()
+            self.query_one("#tests-edit-title", Label).update(
+                f"reasons written to {len(written)} rust2rpm.toml; the next step is regen")
 
         def _show(self, name: str, prefill: list[str] | None = None,
                   flags: list[str] | None = None,
@@ -5195,6 +5319,11 @@ def make_tui_app() -> type:
                 self.action_run_command()
             elif bid == "cancel":
                 self.action_cancel_command()
+            elif bid == "tests-save":
+                self._save_tests_reasons()
+            elif bid == "tests-back":
+                self._refresh_overview()
+                self.query_one("#screens", ContentSwitcher).current = "overview"
             elif "-add-" in bid:
                 key = bid.partition("-add-")[2]
                 f = next(m for m in self._fields if m.key == key)
