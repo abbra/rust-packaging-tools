@@ -1804,12 +1804,13 @@ def trial(pkg: LocalPackage, discover: bool, apply: bool = False, log_name: str 
     info(f"== trial {pkg.crate} {pkg.version} (log: {log})")
     if not discover:
         invocations = spec_invocations(pkg)
+        build_only = not invocations
         if not invocations:
             info("   tests are disabled in rust2rpm.toml; checking that the crate builds")
             invocations = [("build", [])]
         ok = True
         for label, args in invocations:
-            rc, out = _cargo_test(src, fargs + args, log, build_only=not spec_invocations(pkg))
+            rc, out = _cargo_test(src, fargs + args, log, build_only=build_only)
             status = "ok" if rc == 0 else "FAILED"
             ok &= rc == 0
             info(f"   {label:24} {status:7} {_summarize(out)}")
@@ -1827,7 +1828,8 @@ def trial(pkg: LocalPackage, discover: bool, apply: bool = False, log_name: str 
         start = set(fargs[fargs.index("--features") + 1].split(",")) if "--features" in fargs else set()
         if "--no-default-features" not in fargs:
             start.add("default")
-        enabled = feature_closure(feats, start)[0] | feature_closure(feats, start)[1]
+        closure = feature_closure(feats, start)
+        enabled = closure[0] | closure[1]
     skipped = {}
     for t in toml.get("test", []):
         need = [f for f in t.get("required-features", []) if f not in enabled]
