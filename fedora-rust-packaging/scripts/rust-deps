@@ -4345,7 +4345,14 @@ def main() -> None:
     if args.cmd not in ("doctor", "init") and not args.root.is_dir():
         # 'init' creates the tree; 'doctor' reports on it
         die(f"{args.root} is not a directory (wrong --root or ${ROOT_ENV}? 'rust-deps doctor' checks the setup)")
-    args.func(args)
+    try:
+        args.func(args)
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+        die(f"network request failed: {exc}")
+    except xmlrpc.client.Error as exc:
+        die(f"Koji/XML-RPC request failed: {exc}")
+    except KeyboardInterrupt:
+        die("interrupted")
 
 
 if __name__ == "__main__":
