@@ -1229,6 +1229,88 @@ def test_tests_table_comments_and_replace(tmp_path):
     assert rd.replace_tests_comments(plain, ["x"]) == plain
 
 
+def test_parse_review_plan_output_reads_the_board():
+    rows = rd.parse_review_plan_output([
+        "Submit in this order: a ticket names the tickets of the packages it waits for.",
+        "",
+        "=== stage 1",
+        "  1. rust-zmij 1.0.0  update",
+        "       adopted from dist-git rawhide 2cccfd47b7",
+        "  2. rust-synta-derive 0.4.0  READY",
+        "       /r/synta-derive/review-request.txt",
+        "=== stage 2",
+        "  3. rust-synta 0.4.0  NOT READY",
+        "       no local fedora-review result; run 'review' first",
+        "       after: rust-synta-derive",
+        "",
+        "no review needed:",
+        "     rust-ciborium 1.0.0: limited to rhel+epel-10",
+        "summary: 1 ready, 1 not-ready",
+    ])
+    assert [(r["stage"], r["package"], r["state"], r["after"]) for r in rows] == [
+        (1, "rust-zmij", "update", ""),
+        (1, "rust-synta-derive", "READY", ""),
+        (2, "rust-synta", "NOT READY", "rust-synta-derive"),
+    ]
+    assert rows[1]["detail"] == "/r/synta-derive/review-request.txt"
+    assert rd.parse_review_plan_output(["nothing here"]) == []
+
+
+def test_review_request_results_gate_the_filing(tmp_path):
+    make_package(tmp_path, "synta", "rust-synta", "0.4.0")
+    (tmp_path / "synta" / rd.REQUEST_DRAFT).write_text(
+        "Summary: Review Request: rust-synta - Merkle tree certs\n\n"
+        "Spec URL: https://copr.example/synta.spec\n"
+        "SRPM URL: https://copr.example/synta-0.4.0-1.fc46.src.rpm\n"
+        "Upstream URL: https://crates.io/crates/synta\n")
+    parsed, actions = rd.render_review_request_output(
+        ["== review request rust-synta 0.4.0", "   draft: /r/synta/review-request.txt"], tmp_path)
+    assert parsed[0] == ["crate", "version", "summary", "spec", "srpm"]
+    assert parsed[1][0][:3] == ["synta", "0.4.0", "Review Request: rust-synta - Merkle tree certs"]
+    # the gate: filing is offered only while the draft has no ticket
+    assert actions[0][:3] == ("review-request", ["synta"], ["file"])
+    (tmp_path / "synta" / rd.REQUEST_STATE).write_text('{"bug": 1}')
+    parsed, actions = rd.render_review_request_output(
+        ["== review request rust-synta 0.4.0"], tmp_path)
+    assert parsed is not None and actions == []
+
+
+def test_resolve_results_carry_to_init(tmp_path):
+    lines = [
+        "NEW       jsonschema 0.21.0  <- synta",
+        "UPDATE    serde 1.0.220 (Fedora has 1.0.217)  <- synta",
+        "FEATURES  openssl 0.10.7  <- synta-mtc",
+        "            missing features in Fedora package: v0",
+    ]
+    rows = rd.parse_resolve_output(lines)
+    assert [(r["status"], r["crate"], r["version"]) for r in rows] == [
+        ("NEW", "jsonschema", "0.21.0"), ("UPDATE", "serde", "1.0.220"),
+        ("FEATURES", "openssl", "0.10.7")]
+    parsed, actions = rd.render_resolve_output(lines, tmp_path)
+    # only NEW crates become packages to create; UPDATE/FEATURES are decisions, not jumps
+    assert actions[0][:3] == ("init", ["jsonschema"], ["recursive"])
+
+
+def test_update_dry_run_becomes_an_apply_jump():
+    dry = rd.parse_update_output([
+        "== synta-derive: no spec yet; 'rust-deps regen synta-derive' generates one",
+        "Updates, in build order: zmij 0.9.0 -> 1.0.0, synta 0.4.0 -> 0.5.0",
+    ])
+    assert [(r["crate"], r["to"], r["note"]) for r in dry] == [
+        ("synta-derive", "-", "no spec yet; 'rust-deps regen synta-derive' generates one"),
+        ("zmij", "1.0.0", ""), ("synta", "0.5.0", "")]
+    parsed, actions = rd.render_update_output(
+        ["Updates, in build order: zmij 0.9.0 -> 1.0.0"], Path("/unused"))
+    assert actions[0][:2] == ("update", ["zmij"])
+    # a completed update shows what it did, and does not offer to redo it
+    done = rd.parse_update_output([
+        "Updates, in build order: zmij 0.9.0 -> 1.0.0",
+        "== zmij 0.9.0 -> 1.0.0",
+    ])
+    assert [(r["crate"], r["note"]) for r in done] == [("zmij", "updated")]
+    assert rd.render_update_output(["== zmij 0.9.0 -> 1.0.0"], Path("/unused"))[1] == []
+
+
 def test_tui_stage_marks_unexplained_tests_tables(tmp_path):
     make_package(tmp_path, "a", "rust-a", "0.1.0")
     (tmp_path / "a" / "rust2rpm.toml").write_text(
@@ -1569,11 +1651,11 @@ def test_tui_app_tool_proposed_steps_become_jumps(tmp_path):
             app._stdout = plan_lines
             app._render_structured()
             await pilot.pause()
-            # review-plan's own proposal becomes a jump even without a table
+            # the plan renders as a board, and its own proposal becomes a jump
+            assert app.query_one("#result-table").row_count == 1
             assert [(c, cr, fl) for c, cr, fl, _, _ in app._result_actions] == [
                 ("review", ["synta-derive"], [])]
             assert app.query_one("#tabs").active == "table"
-            assert app.query_one("#result-table").row_count == 0
             acts = app.query_one("#result-actions", OptionList)
             app.on_option_list_option_selected(
                 OptionList.OptionSelected(acts, acts.get_option_at_index(0), 0))
