@@ -22,12 +22,23 @@ jobs:
     container: registry.fedoraproject.org/fedora:44
     steps:
       - name: Install dependencies
-        run: dnf -y install --setopt=install_weak_deps=False git-core python3 python3-pytest python3-pyyaml rust2rpm
+        run: dnf -y install --setopt=install_weak_deps=False git-core python3 python3-pytest python3-pyyaml rust2rpm shellcheck
       - uses: actions/checkout@v4
       - name: Compile
         run: python3 -m py_compile fedora-rust-packaging/scripts/rust-deps
+      - name: Shellcheck
+        run: shellcheck install.sh tests/smoke.sh
       - name: Unit tests
         run: python3 -m pytest -v tests
+      - name: install.sh round trip
+        run: |
+          ./install.sh --dest "$RUNNER_TEMP/skills" --bin "$RUNNER_TEMP/bin"
+          test -f "$RUNNER_TEMP/skills/fedora-rust-packaging/SKILL.md"
+          test -x "$RUNNER_TEMP/bin/rust-deps"
+          "$RUNNER_TEMP/bin/rust-deps" --help >/dev/null
+          ./install.sh --uninstall --dest "$RUNNER_TEMP/skills" --bin "$RUNNER_TEMP/bin"
+          test ! -e "$RUNNER_TEMP/skills/fedora-rust-packaging"
+          test ! -e "$RUNNER_TEMP/bin/rust-deps"
 
   smoke:
     name: smoke test (crates.io, Fedora mirrors)
