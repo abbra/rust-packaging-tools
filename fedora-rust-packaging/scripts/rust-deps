@@ -173,7 +173,12 @@ def _cached_json(url: str, key: str, max_age: float | None) -> dict:
 @functools.cache
 def crate_versions(name: str) -> list[dict]:
     """Non-yanked releases of a crate, newest first."""
-    data = _cached_json(f"https://crates.io/api/v1/crates/{name}", f"{name}.json", 86400)
+    try:
+        data = _cached_json(f"https://crates.io/api/v1/crates/{name}", f"{name}.json", 86400)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return []  # no such crate: callers say "not found on crates.io"
+        raise
     return [v for v in data["versions"] if not v["yanked"]]
 
 
