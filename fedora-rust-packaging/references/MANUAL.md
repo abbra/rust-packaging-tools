@@ -123,6 +123,40 @@ hold:
 - `srpm` passes
 - `mock-chain` builds it
 
+## Workflows
+
+The Quick start pipeline is one graph and every command is an edge on it.  The
+TUI's Overview places each package on it (the `stage` column) and suggests the
+edges of the reached stages — the same stages the ready criteria above walk:
+
+```
+resolve → init ─→ package dir ─→ regen ─→ spec ─→ trial --discover ─→ [tests]
+   ─→ srpm ─→ SRPM ─┬─ review-plan ─→ draft ─→ review-request --file ─→ filed ─→ in Fedora
+                    ├─ dist-git ─→ update commits      (adopted: dist-git.toml)
+                    └─ copr ─→ tmt                     (target-limited: targets.toml)
+```
+
+| stage | the local state that puts a package here | the edge out of it |
+|---|---|---|
+| `spec?` | no generated spec | `regen` |
+| `tests?` | no `[tests]` in rust2rpm.toml | `trial --discover` |
+| `srpm?` | no SRPM of the current version | `srpm` |
+| `adopted` | `dist-git.toml` (Fedora already has the package) | `dist-git` |
+| `targets` | `targets.toml` (built only where a target lacks the version) | `copr` |
+| `filed` | `review-request.json` | `review-status` |
+| `draft` | `review-request.txt` | `review-request --file` |
+| `review` | built, not limited, no ticket yet | `review-plan` |
+
+Stages are detected from local files only, first match wins: the build line
+(spec, tests, SRPM) is shared by every package, and only after it do the
+branches split.  Two dimensions the table leaves to the commands themselves:
+within a stage, `order`, `mock-chain`, `copr`, `review` and `review-plan` work
+in dependency order (build stages), and the `tests?` stage expands into the
+discovery chain — `trial --discover`, then `--discover --apply` (write the
+table, regenerate, recheck), then `regen` with real reasons, then `srpm` —
+which the TUI renders as next steps from a trial run's output.  `update` and
+`adopt` re-enter the graph at `regen`.
+
 ## Commands
 
 | command | purpose |
@@ -148,7 +182,7 @@ hold:
 | `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…] [-r RELEASE]… [--project P] [--all-versions]` | Show the packaged version against crates.io and against Fedora and EPEL releases: one column per release, named after it. Without `-r`, the host's release (e.g. `fedora-45`). `-r` takes a release (`fedora-44`, `fedora-rawhide`, `rhel+epel-10` for COPR's EPEL, `epel-10` for EPEL itself) or a chroot, and can be repeated; `--project` adds every release the COPR project builds for. A cell shows the newest version the release has, `=` when it is the one packaged here, and `(+N)` for older ones; `--all-versions` lists them. Also shows compat packages, the targets from `targets.toml`, and whether a patch and an SRPM exist. |
-| `tui` | All of the above in a text UI (needs `python3-textual`): it opens on an Overview — every package under the root with its spec/patch/SRPM/tests/review state, plus suggested next steps that jump into the commands with the right crates picked; a sidebar lists all commands in workflow order; forms are built from the same argparse metadata as `--help`, rendered as what the parser says they are (crate checkboxes, one mode choice per mutually exclusive group, add/remove rows per repeatable option, Run gated on required arguments); the exact `rust-deps …` command line is shown while filling it; output streams live, diagnostics are colored; `status`, `doctor`, `trial` and any `--json` result are rendered as tables, and a `trial` run's verdicts become next steps (test discovery for failures, `srpm` for passes) you can jump into. Keys: arrows/enter pick, `tab` through the form, `ctrl+r` run, `escape` cancel, `ctrl+q` quit. See "Text UI". |
+| `tui` | All of the above in a text UI (needs `python3-textual`): it opens on an Overview — every package under the root with its stage on the lifecycle graph (see "Workflows"), plus suggested next steps that jump into the commands with the right crates picked; a sidebar lists all commands in workflow order; forms are built from the same argparse metadata as `--help`, rendered as what the parser says they are (crate checkboxes, one mode choice per mutually exclusive group, add/remove rows per repeatable option, Run gated on required arguments); the exact `rust-deps …` command line is shown while filling it; output streams live, diagnostics are colored; `status`, `doctor`, `trial` and any `--json` result are rendered as tables, and a `trial` run's verdicts become next steps (test discovery for failures, `srpm` for passes) you can jump into. Keys: arrows/enter pick, `tab` through the form, `ctrl+r` run, `escape` cancel, `ctrl+q` quit. See "Text UI". |
 
 Bugs, comments and builds in the output are links. On a terminal they are
 OSC 8 hyperlinks on short labels (the bug number, `#3`, the build ID);
@@ -180,12 +214,12 @@ groups — and running a command runs `rust-deps` itself as a subprocess.  The
 metadata decides the widget:
 
 - **Overview** (the home screen): a table of the packages under the root —
-  version, spec, patch, SRPM, `[tests]` table, review draft, scope — and the
-  next steps the tree state implies, in Quick-start order (a package without
-  a `[tests]` table suggests `trial --discover`; without an SRPM, `srpm`;
-  once built, `review-plan` and `status`).  Selecting a suggestion opens that
-  command with its crates already checked.  The Overview refreshes after every
-  run.
+  version, spec, patch, SRPM, `[tests]` table, stage, scope — where *stage* is
+  each package's position on the lifecycle graph (see "Workflows"), and the
+  next steps are that graph's edges: every stage reached by at least one
+  package suggests its command, with those crates picked and the flags
+  pre-set.  Selecting a suggestion opens that command.  The Overview refreshes
+  after every run.
 - The sidebar lists all commands, grouped as in the Quick start: Setup, Missing
   crates, Create, Test, Build, COPR builds, Review, In Fedora.
 - **The form is two panes side by side**: the crate picker on the left, the
