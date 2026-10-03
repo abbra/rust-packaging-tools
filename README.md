@@ -107,10 +107,12 @@ rust-deps tui                                        # all of the above in a tex
 
 `rust-deps tui` opens the whole tool in a terminal UI (built with
 [Textual](https://github.com/Textualize/textual)): a sidebar lists every
-command in workflow order, and it opens on an **Overview**: the state of every
-package under the root (spec, patch, SRPM, tests table, review draft, scope)
-and the next steps that state implies — selecting one jumps to that command
-with the right crates already picked. The Overview refreshes after every run.
+command in workflow order, and it opens on an **Overview**: every package
+under the root with its stage on the packaging lifecycle graph (spec → tests
+→ SRPM → review → draft → filed, with the adopted and target-limited
+branches), and the next step the graph implies for each — selecting one jumps
+to that command with the right crates already picked. The Overview refreshes
+after every run.
 The form for the selected command is built from the same argparse metadata as
 `--help` (so the UI and the command line can never drift apart), rendered as
 what the parser says it is, in two panes side by side: the crate selection is
