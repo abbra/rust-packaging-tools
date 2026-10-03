@@ -1746,7 +1746,11 @@ def test_tui_app_tests_editor_writes_reasons(tmp_path):
             await pilot.pause()
             assert app.query_one("#screens", ContentSwitcher).current == "tests-edit"
             # the TODO text arrives editable, with the table itself as context
-            assert "run = false" in app.query_one("#tests-edit-table", Static).content
+            table = app.query_one("#tests-edit-table", Static)
+            # Static stores the updated text in .content (textual ≥8) or
+            # ._content (textual 4.0); read whichever exists.
+            shown = getattr(table, "content", None) or getattr(table, "_content", None)
+            assert "run = false" in shown
             editor = app.query_one("#tests-edit-rows")
             assert len(editor.query(Input)) == 1
             editor.query(Input).first().value = "doc tests need network; %cargo_test skips them"
