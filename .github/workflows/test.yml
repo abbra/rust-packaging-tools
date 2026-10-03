@@ -48,3 +48,9 @@ jobs:
         run: fedora-rust-packaging/scripts/rust-deps --help
       - name: Smoke test
         run: tests/smoke.sh
+      - name: Keep the generated tree on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-work
+          path: ${{ runner.temp }}/
