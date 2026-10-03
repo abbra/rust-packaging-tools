@@ -179,6 +179,14 @@ def test_add_default_feature_replaces_dropped_one():
     assert t["features"]["default"] == ["tls-ring", "std"]
 
 
+def test_add_default_feature_declares_a_missing_default():
+    """Without an explicit default, cargo's implicit default enables no optional crate."""
+    text = CARGO_TOML.replace('default = ["std", "tls-aws-lc-rs"]\n', "")
+    t = edit({"drop-features": ["tls-aws-lc-rs"], "add-default-features": ["tls-ring"]}, text)
+    assert t["features"]["default"] == ["tls-ring"]
+    assert "tls-aws-lc-rs" not in t["features"]
+
+
 def test_set_versions():
     t = edit({"set-version": {"zmij": "1.0.23"}, "set-dev-version": {"hex": "0.4"}})
     assert t["dependencies"]["zmij"]["version"] == "1.0.23"
@@ -252,6 +260,21 @@ def test_targets_toml(tmp_path):
 ])
 def test_unsafe_skips(tests, bad):
     assert rd.unsafe_skips(tests) == bad
+
+
+@pytest.mark.parametrize("skip, bad", [
+    ("src/lib.rs - (line 15)", ["src/lib.rs - (line 15)"]),
+    ("tests::ok", []),
+])
+def test_unsafe_skips_accepts_a_lone_string(skip, bad):
+    assert rd.unsafe_skips({"skip": skip}) == bad
+
+
+def test_spec_invocations_with_a_string_skip(tmp_path):
+    d = make_package(tmp_path, "smol", "rust-smol", "2.0.2")
+    (d / "rust2rpm.toml").write_text('[tests]\nskip = "tests::needs_network"\n')
+    assert rd.spec_invocations(rd.local_packages(tmp_path)["smol"]) == \
+        [("all", ["--", "--skip", "tests::needs_network"])]
 
 
 def test_trial_refuses_unsafe_skips(tmp_path, capsys):
@@ -365,6 +388,15 @@ def test_resolve_counts_a_matching_local_package(tmp_path, monkeypatch):
     make_package(tmp_path, "mid", "rust-mid", "1.5.0")
     needed = rd.resolve([("top", "*", "(test)", ["default"])], rd.FedoraIndex({}), rd.local_packages(tmp_path))
     assert set(needed) == {"top@2.0.0"}  # mid is covered by the local package
+
+
+def test_crate_versions_treats_404_as_no_such_crate(monkeypatch):
+    def not_found(url, key, max_age):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    monkeypatch.setattr(rd, "_cached_json", not_found)
+    rd.crate_versions.cache_clear()
+    assert rd.crate_versions("nosuchcrate12345") == []
+    rd.crate_versions.cache_clear()
 
 
 def releases(monkeypatch, *nums):
