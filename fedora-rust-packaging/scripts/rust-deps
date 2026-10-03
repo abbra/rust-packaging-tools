@@ -4136,14 +4136,15 @@ def cmd_doctor(args) -> None:
 # same argparse parser as the command line, so the UI cannot drift from it; the
 # parser's structure decides the
 # widget (crate picker, mode choice for exclusive groups, rows for repeatable
-# options, Run gated on required arguments).  Each command runs as a
-# 'rust-deps' subprocess whose output streams into the view: block headers and
-# verdict words are colored, and 'status', 'doctor', 'trial', 'srpm' and any
-# '--json' result are additionally rendered as tables.  Where a tool proposes
-# next steps in its own output (a quoted 'run 'review' first' or a full
-# 'rust-deps …' line), tui_suggested_actions turns them into jumps under the
-# result.  The Textual APIs used here exist unchanged
-# in Textual 4 (Fedora 44) and Textual 8.
+# options, Run gated on required arguments).  What each command's screen then
+# does is data, not per-screen code: TUI_PLAYBOOKS names the result renderer
+# that shapes its output into a table and next steps (TUI_RESULT_RENDERERS),
+# the tools it needs (the sidebar gates on 'doctor'), and which form values
+# carry over from the previous run (the COPR project, the target chroot).
+# Next-step jumps carry the crates, flags and literal option values the tool
+# itself named.  Each command runs as a 'rust-deps' subprocess whose output
+# streams into the view, with block headers and verdict words colored.  The
+# Textual APIs used here exist unchanged in Textual 4 (Fedora 44) and Textual 8.
 
 TUI_SECTIONS = [
     ("Setup", ["doctor", "status"]),
@@ -4188,6 +4189,13 @@ def tui_option(action: argparse.Action) -> str:
     return next((o for o in action.option_strings if o.startswith("--")), action.option_strings[0])
 
 
+def tui_option_strings(action: argparse.Action) -> list[str]:
+    """The canonical option first (what the form passes), then its aliases: the
+    tools' own command lines may name the short form ('-r' beside '--chroot')."""
+    canonical = tui_option(action)
+    return [canonical] + [o for o in action.option_strings if o != canonical]
+
+
 def tui_fields(parser: argparse.ArgumentParser) -> list[TuiField]:
     """The form of one subcommand, generated from its argparse actions."""
     fields: list[TuiField] = []
@@ -4210,16 +4218,16 @@ def tui_fields(parser: argparse.ArgumentParser) -> list[TuiField]:
             fields.append(TuiField(kind, action.dest, key, [], metavar, metavar, help_text,
                                    action.nargs == "+", "", True, group))
         elif cls in ("_StoreTrueAction", "_StoreFalseAction"):
-            fields.append(TuiField("flag", action.dest, key, [tui_option(action)], label, "",
+            fields.append(TuiField("flag", action.dest, key, tui_option_strings(action), label, "",
                                    help_text, False, "", False, group))
         elif cls == "_AppendAction":
-            fields.append(TuiField("multi", action.dest, key, [tui_option(action)], label, metavar,
+            fields.append(TuiField("multi", action.dest, key, tui_option_strings(action), label, metavar,
                                    help_text, action.required, "", False, group))
         elif action.type is int:
-            fields.append(TuiField("number", action.dest, key, [tui_option(action)], label, metavar,
+            fields.append(TuiField("number", action.dest, key, tui_option_strings(action), label, metavar,
                                    help_text, action.required, default, False, group))
         else:
-            fields.append(TuiField("text", action.dest, key, [tui_option(action)], label, metavar,
+            fields.append(TuiField("text", action.dest, key, tui_option_strings(action), label, metavar,
                                    help_text, action.required, default, False, group))
     return fields
 
@@ -4338,28 +4346,28 @@ def tui_package_rows(root: Path) -> tuple[list[str], list[list[str]]]:
     return headers, rows
 
 
-def tui_suggestions(root: Path) -> list[tuple[str, list[str], list[str], str]]:
+def tui_suggestions(root: Path) -> list[tuple[str, list[str], list[str], dict[str, str], str]]:
     """Next steps implied by the tree state: (command, crates to preselect,
-    flag field keys to pre-check, why).
+    flag field keys to pre-check, option values to prefill, why).
     Derived from the lifecycle graph: every package is placed on a stage, and
     each reached stage yields its edges with those crates picked.  Everything
     here is local."""
     pkgs = _overview_packages(root)
     if not pkgs:
-        return [("resolve", [], [], "nothing under this root yet: find the crates a project needs"),
-                ("init", [], [], "or create packages directly")]
+        return [("resolve", [], [], {}, "nothing under this root yet: find the crates a project needs"),
+                ("init", [], [], {}, "or create packages directly")]
     at: dict[str, list[str]] = {}
     for p in pkgs:
         at.setdefault(tui_stage(p).name, []).append(p.crate)
-    out: list[tuple[str, list[str], list[str], str]] = []
+    out: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
     for stage in TUI_STAGES:
         crates = at.get(stage.name)
         if not crates:
             continue
         for cmd, flags, why in stage.edges:
-            out.append((cmd, crates, flags, f"{stage.name}: {why}"))
+            out.append((cmd, crates, flags, {}, f"{stage.name}: {why}"))
     if any(has_srpm(p) for p in pkgs):
-        out.append(("status", [], [], "packaged vs. crates.io vs. the Fedora releases"))
+        out.append(("status", [], [], {}, "packaged vs. crates.io vs. the Fedora releases"))
     return out
 
 
@@ -4404,7 +4412,7 @@ def parse_trial_output(lines: list[str]) -> list[dict]:
     return rows
 
 
-def tui_trial_actions(rows: list[dict]) -> list[tuple[str, list[str], list[str], str]]:
+def tui_trial_actions(rows: list[dict]) -> list[tuple[str, list[str], list[str], dict[str, str], str]]:
     """Next steps implied by a trial run, plain or discovery.  The last block per
     crate decides: --apply chains a recheck after writing the suggested table."""
     last: dict[str, dict] = {}
@@ -4419,22 +4427,22 @@ def tui_trial_actions(rows: list[dict]) -> list[tuple[str, list[str], list[str],
     def group(pred) -> list[str]:
         return sorted(c for c, b in last.items() if pred(b))
 
-    out: list[tuple[str, list[str], list[str], str]] = []
+    out: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
     # a discovery that found failures has already produced the suggestion: apply it
     if s := group(lambda b: b["mode"] == "discover" and b["failed"]):
-        out.append(("trial", s, ["discover", "apply"],
+        out.append(("trial", s, ["discover", "apply"], {},
                     "a [tests] table was suggested: --apply writes it, regenerates and rechecks"))
     for c in group(lambda b: b["mode"] == "plain" and b["failed"]):
-        out.append(("trial", [c], ["discover"],
+        out.append(("trial", [c], ["discover"], {},
                     f"{', '.join(last[c]['failed'])} failed: --discover suggests the [tests] table that skips them"))
     if s := group(lambda b: b["mode"] == "recheck" and b["failed"]):
-        out.append(("trial", s, ["discover"],
+        out.append(("trial", s, ["discover"], {},
                     "the applied table still fails: --discover suggests another one"))
     if s := group(lambda b: b["mode"] == "recheck" and not b["failed"]):
-        out.append(("regen", s, [],
-                    "the applied table passes: replace its TODO comments with real reasons, then regen"))
+        out.append(("tests-edit", s, [], {},
+                    "the applied table passes: write the real reasons into rust2rpm.toml, then regen"))
     if s := group(lambda b: not b["failed"] and b["mode"] != "recheck"):
-        out.append(("srpm", s, [], "all their test targets pass: build the SRPMs"))
+        out.append(("srpm", s, [], {}, "all their test targets pass: build the SRPMs"))
     return out
 
 
@@ -4486,46 +4494,63 @@ _SUGGEST_QUOTED_RE = re.compile(r"'([^']{1,120})'")
 _SUGGEST_LINE_RE = re.compile(r"rust-deps(?: --root \S+)? ([a-z][a-z-]+)(.*)")
 
 
+def _is_literal_value(token: str) -> bool:
+    """An option value the tool interpolated, not a metavar placeholder (NAME, <chroot>)."""
+    return bool(token) and not re.match(r'^(?:<.*>|".*|[A-Z][A-Z0-9_=|,.]*)$', token)
+
+
 def tui_suggested_actions(lines: list[str], root: Path,
-                         commands: dict) -> list[tuple[str, list[str], list[str], str]]:
-    """Steps the tools themselves propose in their output, as jumpable actions.
+                         commands: dict) -> list[tuple[str, list[str], list[str], dict[str, str], str]]:
+    """Steps the tools themselves propose in their own output, as jumpable actions.
 
     A proposal is a quoted command ('review', 'copr --wait', 'adopt crate') or a
     full 'rust-deps …' line.  Crates are the ones named in the line (resolved
-    against the tree), else the package block the proposal sits in; option
-    values and placeholders are skipped.  The tool's own wording is kept as the why.
+    against the tree), else the package block the proposal sits in.  Literal
+    option values are captured so the jump prefills them (--project, -r);
+    metavar placeholders are skipped.  A command with a single positional crate
+    (copr-log) gets it as a form value.  The tool's own wording is kept as the why.
     """
     crates_of: dict[str, str] = {}
     for p in local_packages(root).values():
         crates_of[p.crate] = p.crate
         crates_of[p.rpm_name] = p.crate
 
-    def args_of(cmd: str, tokens: list[str]) -> tuple[list[str], list[str]]:
+    def args_of(cmd: str, tokens: list[str]) -> tuple[list[str], list[str], dict[str, str]]:
         flags: list[str] = []
         picked: list[str] = []
+        values: dict[str, str] = {}
         opts = {o: f for f in commands[cmd][1] for o in f.options}
         i = 0
         while i < len(tokens):
             t = tokens[i]
             if t in opts:
-                if opts[t].kind == "flag":
-                    flags.append(opts[t].key)
+                f = opts[t]
+                if f.kind == "flag":
+                    flags.append(f.key)
+                elif i + 1 < len(tokens) and _is_literal_value(tokens[i + 1]):
+                    v = tokens[i + 1]
+                    values[f.key] = f"{values[f.key]} {v}" if f.kind == "multi" and f.key in values else v
+                    i += 1
                 else:
-                    i += 1  # skip the option's value
+                    i += 1  # skip the option's placeholder value
             elif t in crates_of:
                 picked.append(crates_of[t])
             i += 1
-        return flags, picked
+        return flags, picked, values
 
-    out: list[tuple[str, list[str], list[str], str]] = []
+    out: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
     seen: set[tuple] = set()
     ctx: list[str] = []
 
-    def add(cmd: str, crates: list[str], flags: list[str], why: str) -> None:
-        key = (cmd, tuple(crates), tuple(flags))
+    def add(cmd: str, crates: list[str], flags: list[str], values: dict[str, str], why: str) -> None:
+        pos = next((f for f in commands[cmd][1] if f.positional and f.kind == "text"), None)
+        if pos is not None and pos.dest != "crates" and crates:
+            values = {**values, pos.key: crates[0]}
+            crates = []
+        key = (cmd, tuple(crates), tuple(flags), tuple(sorted(values.items())))
         if key not in seen:
             seen.add(key)
-            out.append((cmd, crates, flags, why))
+            out.append((cmd, crates, flags, values, why))
 
     for line in lines:
         if m := _SUGGEST_STEP_RE.match(line):
@@ -4545,13 +4570,13 @@ def tui_suggested_actions(lines: list[str], root: Path,
             continue
         for m in _SUGGEST_LINE_RE.finditer(line):
             if m.group(1) in commands:
-                flags, picked = args_of(m.group(1), m.group(2).split())
-                add(m.group(1), picked, flags, stripped)
+                flags, picked, values = args_of(m.group(1), m.group(2).split())
+                add(m.group(1), picked, flags, values, stripped)
         for m in _SUGGEST_QUOTED_RE.finditer(line):
             tokens = m.group(1).split()
             if tokens and tokens[0] in commands:
-                flags, picked = args_of(tokens[0], tokens[1:])
-                add(tokens[0], picked or list(ctx), flags, stripped)
+                flags, picked, values = args_of(tokens[0], tokens[1:])
+                add(tokens[0], picked or list(ctx), flags, values, stripped)
     return out
 
 
@@ -4639,8 +4664,124 @@ def parse_json_table(data: object) -> tuple[list[str], list[list[str]]] | None:
     if isinstance(data, dict):
         return ["key", "value"], [[k, cell(v)] for k, v in data.items()]
     if isinstance(data, list):
-        return ["value"], [[cell(v)] for v in data]
+        return ["value"], [[cell(v) for v in data]]
     return None
+
+
+def render_trial_output(lines: list[str], root: Path):
+    """trial's verdict lines are the case where the log hides the shape:
+    render them as a table and turn failures into next steps."""
+    trial_rows = parse_trial_output(lines)
+    if not trial_rows:
+        return None, []
+    parsed = (["crate", "version", "target", "status", "summary", "first error"],
+              [[r["crate"], r["version"], r["target"], r["status"], r["summary"], r["detail"]]
+               for r in trial_rows])
+    return parsed, tui_trial_actions(trial_rows)
+
+
+def render_srpm_output(lines: list[str], root: Path):
+    """like trial, srpm's per-crate stage lines are verdict-shaped"""
+    srpm_rows = parse_srpm_output(lines)
+    if not srpm_rows:
+        return None, []
+    parsed = (["crate", "version", "srpm", "%prep", "rpmlint"],
+              [[r["crate"], r["version"], r["srpm"], r["prep"], r["rpmlint"]] for r in srpm_rows])
+    return parsed, []
+
+
+def render_status_output(lines: list[str], root: Path):
+    return parse_columns_table(lines), []
+
+
+def render_doctor_output(lines: list[str], root: Path):
+    return parse_state_table(lines), []
+
+
+_CS_STAGE_RE = re.compile(r"^=== stage (\d+)$")
+_CS_PKG_RE = re.compile(r"^(\S+) (\S+): (?:no COPR build of this version|build .*)$")
+_CS_VERDICT_RE = re.compile(r"^   (ok|BUILDING|WAIT|RETRY|BLOCKED|FAILED)\s+(.*)$")
+
+
+def parse_copr_status_output(lines: list[str]) -> list[dict]:
+    """The 'copr-status' diagnosis as ladder rows: stage, crate, evr, verdict, chroots.
+
+    Chroots grouped under one verdict share a row; the '(build N)' reference to
+    an older build and the diagnostic notes stay in the log."""
+    rows: list[dict] = []
+    stage, cur = 0, None
+    for line in lines:
+        if m := _CS_STAGE_RE.match(line):
+            stage, cur = int(m.group(1)), None
+        elif m := _CS_PKG_RE.match(line):
+            if "no COPR build" in line:
+                rows.append({"stage": stage, "crate": m.group(1), "evr": m.group(2),
+                             "verdict": "none", "chroots": ""})
+                cur = None
+            else:
+                cur = {"stage": stage, "crate": m.group(1), "evr": m.group(2)}
+        elif cur is not None and (m := _CS_VERDICT_RE.match(line)):
+            chroots = " ".join(t for t in m.group(2).split() if not t.startswith(("(", "http")))
+            rows.append({**cur, "verdict": m.group(1), "chroots": chroots})
+        elif line.startswith(("summary:", "- ")):
+            cur = None
+    return rows
+
+
+def render_copr_status_output(lines: list[str], root: Path):
+    rows = parse_copr_status_output(lines)
+    if not rows:
+        return None, []
+    parsed = (["stage", "crate", "evr", "verdict", "chroots"],
+              [[str(r["stage"]), r["crate"], r["evr"], r["verdict"], r["chroots"]] for r in rows])
+    return parsed, []
+
+
+TUI_RESULT_RENDERERS = {
+    "trial": render_trial_output,
+    "srpm": render_srpm_output,
+    "status": render_status_output,
+    "doctor": render_doctor_output,
+    "copr-status": render_copr_status_output,
+}
+
+
+@dataclass
+class TuiPlaybook:
+    """What one command's screen does, as data: 'result' names the renderer
+    that shapes its output into a table and next steps ('' keeps the generic
+    log view); 'requires' lists tools 'doctor' reports, and the sidebar dims
+    the command while one is missing; 'carry' are form values the previous run
+    established (the COPR project, the target chroot) that this form keeps."""
+    result: str = ""
+    requires: tuple[str, ...] = ()
+    carry: tuple[str, ...] = ()
+
+
+TUI_PLAYBOOKS = {
+    "doctor": TuiPlaybook(result="doctor"),
+    "status": TuiPlaybook(result="status", carry=("target",)),
+    "resolve": TuiPlaybook(),
+    "order": TuiPlaybook(),
+    "check-targets": TuiPlaybook(carry=("chroot", "project")),
+    "init": TuiPlaybook(carry=("target",)),
+    "regen": TuiPlaybook(),
+    "update": TuiPlaybook(),
+    "trial": TuiPlaybook(result="trial"),
+    "srpm": TuiPlaybook(result="srpm"),
+    "mock-chain": TuiPlaybook(requires=("mock",)),
+    "copr": TuiPlaybook(requires=("copr-cli",), carry=("project", "chroot")),
+    "copr-log": TuiPlaybook(requires=("copr-cli",), carry=("project",)),
+    "copr-status": TuiPlaybook(result="copr-status", requires=("copr-cli",),
+                               carry=("project", "chroot")),
+    "tmt": TuiPlaybook(requires=("mock",), carry=("project",)),
+    "review": TuiPlaybook(requires=("fedora-review", "mock"), carry=("chroot",)),
+    "review-request": TuiPlaybook(carry=("project", "chroot")),
+    "review-plan": TuiPlaybook(carry=("project", "chroot")),
+    "review-status": TuiPlaybook(),
+    "adopt": TuiPlaybook(),
+    "dist-git": TuiPlaybook(requires=("fedpkg",)),
+}
 
 
 _TUI_LINE_STYLES: list[tuple[re.Pattern[str], str]] = [
@@ -4739,8 +4880,11 @@ def make_tui_app() -> type:
             self._gen = 0
             self._prefill: set[str] = set()
             self._prefill_flags: set[str] = set()
-            self._suggestions: list[tuple[str, list[str], list[str], str]] = []
-            self._result_actions: list[tuple[str, list[str], list[str], str]] = []
+            self._prefill_values: dict[str, str] = {}
+            self._last_form_values: dict[str, str] = {}
+            self._tools_ok: dict[str, bool] = {}
+            self._suggestions: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
+            self._result_actions: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -4797,9 +4941,9 @@ def make_tui_app() -> type:
             if event.option_list.id in ("suggestions", "result-actions"):
                 src = (self._suggestions if event.option_list.id == "suggestions"
                        else self._result_actions)
-                cmd, crates, flags, _ = src[event.option_index]
+                cmd, crates, flags, values, _ = src[event.option_index]
                 self.query_one("#screens", ContentSwitcher).current = "work"
-                self._show(cmd, prefill=crates, flags=flags)
+                self._show(cmd, prefill=crates, flags=flags, values=values)
             elif event.option_id == "overview":
                 self._refresh_overview()
                 self.query_one("#screens", ContentSwitcher).current = "overview"
@@ -4808,13 +4952,23 @@ def make_tui_app() -> type:
                 self._show(event.option_id)
 
         def _fill_actions(self, options: OptionList,
-                         actions: list[tuple[str, list[str], list[str], str]]) -> None:
+                         actions: list[tuple[str, list[str], list[str], dict[str, str], str]]) -> None:
             options.clear_options()
-            for i, (cmd, crates, flags, why) in enumerate(actions):
+            for i, (cmd, crates, flags, values, why) in enumerate(actions):
+                fields = commands[cmd][1] if cmd in commands else []
                 picked = " ".join(crates[:3]) + (" …" if len(crates) > 3 else "")
-                if flags:
-                    picked += " " + " ".join(
-                        next(f.label for f in commands[cmd][1] if f.key == key) for key in flags)
+                bits = [f.label for key in flags
+                        if (f := next((fl for fl in fields if fl.key == key), None))]
+                for key, val in values.items():
+                    f = next((fl for fl in fields if fl.key == key), None)
+                    if f is None:
+                        continue
+                    if f.positional:  # a single-positional crate reads as the crate
+                        picked = (picked + " " + val).strip()
+                    else:
+                        bits.append(f"{f.label} {val}")
+                if bits:
+                    picked += ("  " if picked else "") + "  ".join(bits)
                 prompt = Text()  # a Text renderable: reasons may contain '[tests]' etc.
                 prompt.append(cmd + " ", style="bold")
                 if picked:
@@ -4833,13 +4987,19 @@ def make_tui_app() -> type:
             self._fill_actions(self.query_one("#suggestions", OptionList), self._suggestions)
 
         def _show(self, name: str, prefill: list[str] | None = None,
-                  flags: list[str] | None = None) -> None:
+                  flags: list[str] | None = None,
+                  values: dict[str, str] | None = None) -> None:
             self._cancel_proc()
             self._cmd = name
             # the result views belong to the previous command: start from the log
             self.query_one("#tabs", Tabs).active = "log"
             self._prefill = set(prefill or [])
             self._prefill_flags = set(flags or [])
+            # the playbook's carry list keeps what the previous run established
+            # (the COPR project, the target chroot); an explicit jump wins
+            pb = TUI_PLAYBOOKS.get(name)
+            carried = {k: v for k in pb.carry if (v := self._last_form_values.get(k))} if pb else {}
+            self._prefill_values = {**carried, **(values or {})}
             help_text, fields, controls = commands[name]
             self.query_one("#cmd-help", Static).update(Text(f"{name} — {help_text}"))
             async def rebuild() -> None:
@@ -4887,7 +5047,8 @@ def make_tui_app() -> type:
                 hint = f.metavar + (" (required)" if f.required else "")
                 if f.help:
                     hint += " — " + textwrap.shorten(f.help, width=44, placeholder=" …")
-                widget = Input(value=f.default, placeholder=hint, id=widget_id,
+                widget = Input(value=self._prefill_values.get(f.key, f.default), placeholder=hint,
+                               id=widget_id,
                                type="number" if f.kind == "number" else "text")
                 await form.mount(Label(f.label, classes="field-label"), widget)
             self._widgets[f.key] = widget
@@ -4916,7 +5077,9 @@ def make_tui_app() -> type:
             hint = crates_field.metavar + " not in the tree; space-separated"
             if crates_field.required:
                 hint += " (required)"
-            extra = Input(placeholder=hint, id=self._wid("f-crates-extra"))
+            # crates a jump names that are not in the tree yet arrive as names to create
+            extra = Input(value=" ".join(sorted(self._prefill - set(pkgs))),
+                          placeholder=hint, id=self._wid("f-crates-extra"))
             await form.mount(Label("other crates", classes="field-label"), extra)
             self._crate_extra = extra
             all_field = next((f for f in c.fields if f.dest == "all"), None)
@@ -4937,6 +5100,10 @@ def make_tui_app() -> type:
             await form.mount(Label("choose one of: " + "  ".join(f.label for f in c.fields),
                                    classes="field-label"), select, holder)
             self._selects[gi] = select
+            for f in c.fields:
+                if f.key in self._prefill_flags or f.key in self._prefill_values:
+                    select.value = f.key  # posts Select.Changed: its input mounts prefilled
+                    break
 
         async def _render_multi(self, form: Vertical, c: TuiControl) -> None:
             """A repeatable option: rows of inputs with add/remove."""
@@ -4950,12 +5117,13 @@ def make_tui_app() -> type:
                                     tooltip=f"add another {f.options[0]}"))
             self._multi_rows[f.key] = []
             self._multi_next[f.key] = 0
-            self._add_multi_row(holder, f, hint)
+            for v in self._prefill_values.get(f.key, "").split() or [""]:
+                self._add_multi_row(holder, f, hint, v)
 
-        def _add_multi_row(self, holder: Vertical, f: TuiField, hint: str):
+        def _add_multi_row(self, holder: Vertical, f: TuiField, hint: str, value: str = ""):
             n = self._multi_next[f.key]
             self._multi_next[f.key] += 1
-            widget = Input(placeholder=hint, id=self._wid(f"f-{f.key}-{n}"))
+            widget = Input(value=value, placeholder=hint, id=self._wid(f"f-{f.key}-{n}"))
             holder.mount(Horizontal(widget, Button("–", id=self._wid(f"rm-{f.key}-{n}"))))
             self._multi_rows[f.key].append(widget)
             return widget
@@ -5014,7 +5182,8 @@ def make_tui_app() -> type:
             if key:
                 f = next(m for m in self._fields if m.key == key)
                 if f.kind in ("text", "number"):
-                    widget = Input(value=f.default, placeholder=f.metavar, id=self._wid(f"f-{f.key}"),
+                    widget = Input(value=self._prefill_values.get(f.key, f.default),
+                                   placeholder=f.metavar, id=self._wid(f"f-{f.key}"),
                                    type="number" if f.kind == "number" else "text")
                     await holder.mount(widget)
                     self._choice_inputs[gi] = widget
@@ -5045,8 +5214,12 @@ def make_tui_app() -> type:
         def action_run_command(self) -> None:
             if not self._cmd or tui_missing_required(self._fields, self._values()):
                 return
+            values = self._values()
             argv = [sys.executable, str(Path(__file__).resolve()), "--root", str(self.root),
-                    self._cmd, *self._argv()]
+                    self._cmd, *tui_argv(self._fields, values)]
+            # the playbook carry lists read from here when the next command opens
+            self._last_form_values = {k: v for k, v in values.items()
+                                      if isinstance(v, str) and v.strip()}
             log = self.query_one("#log", RichLog)
             log.clear()
             self.query_one("#result-table", DataTable).clear()
@@ -5120,37 +5293,22 @@ def make_tui_app() -> type:
 
         def _render_structured(self) -> None:
             parsed: tuple[list[str], list[list[str]]] | None = None
-            actions: list[tuple[str, list[str], list[str], str]] = []
+            actions: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
             if self._json_checked():
                 try:
                     parsed = parse_json_table(json.loads("\n".join(self._stdout)))
                 except json.JSONDecodeError:
                     parsed = None
-            elif self._cmd == "status":
-                parsed = parse_columns_table(self._stdout)
-            elif self._cmd == "doctor":
-                parsed = parse_state_table(self._stdout)
-            elif self._cmd == "trial":
-                # trial's verdict lines are the case where the log hides the shape:
-                # render them as a table and turn failures into next steps
-                trial_rows = parse_trial_output(self._stdout)
-                if trial_rows:
-                    parsed = (["crate", "version", "target", "status", "summary", "first error"],
-                              [[r["crate"], r["version"], r["target"], r["status"],
-                                r["summary"], r["detail"]] for r in trial_rows])
-                    actions = tui_trial_actions(trial_rows)
-            elif self._cmd == "srpm":
-                # like trial, srpm's per-crate stage lines are verdict-shaped
-                srpm_rows = parse_srpm_output(self._stdout)
-                if srpm_rows:
-                    parsed = (["crate", "version", "srpm", "%prep", "rpmlint"],
-                              [[r["crate"], r["version"], r["srpm"], r["prep"],
-                                r["rpmlint"]] for r in srpm_rows])
+            else:
+                pb = TUI_PLAYBOOKS.get(self._cmd or "")
+                if pb and pb.result in TUI_RESULT_RENDERERS:
+                    parsed, actions = TUI_RESULT_RENDERERS[pb.result](self._stdout, self.root)
             # steps the tools propose in their own wording become jumps too
-            known = {(a[0], tuple(a[1]), tuple(a[2])) for a in actions}
+            known = {(a[0], tuple(a[1]), tuple(a[2]), tuple(sorted(a[3].items()))) for a in actions}
             for a in tui_suggested_actions(self._stdout, self.root, commands):
-                if (a[0], tuple(a[1]), tuple(a[2])) not in known:
-                    known.add((a[0], tuple(a[1]), tuple(a[2])))
+                key = (a[0], tuple(a[1]), tuple(a[2]), tuple(sorted(a[3].items())))
+                if key not in known:
+                    known.add(key)
                     actions.append(a)
             self._result_actions = actions
             self._fill_actions(self.query_one("#result-actions", OptionList), actions)
