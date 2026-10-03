@@ -1066,6 +1066,72 @@ def test_parse_columns_table_reads_status_output():
          ["jsonschema (compat)", "0.58.0", "0.58.0", "0.58.0=", "-", "yes"]])
 
 
+def _tui_commands():
+    return {name: ("", rd.tui_fields(p), rd.tui_controls(p))
+            for name, p in _subcommand_parsers().items()}
+
+
+def test_tui_suggested_actions_follows_what_the_tools_propose(tmp_path):
+    make_package(tmp_path, "synta", "rust-synta", "0.4.0")
+    make_package(tmp_path, "synta-derive", "rust-synta-derive", "0.4.0")
+    commands = _tui_commands()
+    plan = [
+        "Submit in this order: a ticket names the tickets of the packages it waits for.",
+        "",
+        "=== stage 1",
+        "  1. rust-synta 0.4.0  READY",
+        "       /r/synta/review-request.txt",
+        "  2. rust-synta-derive 0.4.0  NOT READY",
+        "       no local fedora-review result; run 'review' first",
+        "       after: synta",
+        "",
+        "summary: 1 ready, 1 not-ready",
+        "file the READY ones, in this order: rust-deps review-request --project u/p --fas NAME --file synta",
+    ]
+    acts = rd.tui_suggested_actions(plan, tmp_path, commands)
+    triples = [(c, cr, fl) for c, cr, fl, _ in acts]
+    # review-plan's own wording names the step and the package block picks the crate
+    assert ("review", ["synta-derive"], []) in triples
+    assert next(why for c, _, _, why in acts if c == "review") == \
+        "no local fedora-review result; run 'review' first"
+    # a full rust-deps line carries its own crates and flags; option values are skipped
+    assert ("review-request", ["synta"], ["file"]) in triples
+
+    status = [
+        "== rust-synta: https://bugzilla.redhat.com/show_bug.cgi?id=2361903",
+        "   NEW; fedora-review?; reviewer nobody; last change 2026-10-01",
+        '   next: address the comments above: fix, regen, srpm, review, copr --wait, '
+        'then \'review-request --file --comment "<what changed>"\'',
+    ]
+    triples = [(c, cr, fl) for c, cr, fl, _ in rd.tui_suggested_actions(status, tmp_path, commands)]
+    assert ("review-request", ["synta"], ["file"]) in triples
+
+    copr = [
+        "=== stage 1",
+        "synta-derive 0.4.0-1.fc46: build 4488123",
+        "   RETRY    fedora-rawhide-x86_64",
+        "            rust-bar-devel: nothing provides it",
+        "",
+        "summary: 1 retry",
+        "- resubmit what can succeed now:",
+        "    rust-deps --root /r copr --retry-failed --project u/p synta-derive",
+    ]
+    triples = [(c, cr, fl) for c, cr, fl, _ in rd.tui_suggested_actions(copr, tmp_path, commands)]
+    assert ("copr", ["synta-derive"], ["retry_failed"]) in triples
+
+    # prose that quotes non-commands suggests nothing
+    noise = [
+        "== trial synta 0.4.0 (log: /l/synta.log)",
+        "   all                      FAILED  0 passed, 1 failed",
+        "      don't use 'cargo' directly; the mock's 'cargo test' macro runs it",
+    ]
+    assert rd.tui_suggested_actions(noise, tmp_path, commands) == []
+    # a real proposal with a placeholder crate still jumps, just without crates
+    footer = ["* = newer version on crates.io ('rust-deps update <crate>' to update)"]
+    assert rd.tui_suggested_actions(footer, tmp_path, commands) == \
+        [("update", [], [], footer[0])]
+
+
 def test_parse_columns_table_ignores_free_form_output():
     assert rd.parse_columns_table(["== serde 1.0.217", "   rust2rpm --features default",
                                    "   ok", "NEW       serde 1.0  <- jsonschema"]) is None
@@ -1325,5 +1391,45 @@ def test_tui_app_srpm_results_render_as_a_table(tmp_path):
             app._show("status")
             await app._rebuild.wait()
             assert app.query_one("#tabs").active == "log"
+
+    asyncio.run(drive())
+
+
+def test_tui_app_tool_proposed_steps_become_jumps(tmp_path):
+    pytest.importorskip("textual")
+    from textual.widgets import OptionList
+    app_class = rd.make_tui_app()
+    make_package(tmp_path, "synta-derive", "rust-synta-derive", "0.4.0")
+    plan_lines = [
+        "Submit in this order: a ticket names the tickets of the packages it waits for.",
+        "",
+        "=== stage 1",
+        "  1. rust-synta-derive 0.4.0  NOT READY",
+        "       no local fedora-review result; run 'review' first",
+        "",
+        "summary: 1 not-ready",
+    ]
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(140, 45)) as pilot:
+            await pilot.pause()
+            app._show("review-plan")
+            await app._rebuild.wait()
+            app._stdout = plan_lines
+            app._render_structured()
+            await pilot.pause()
+            # review-plan's own proposal becomes a jump even without a table
+            assert [(c, cr, fl) for c, cr, fl, _ in app._result_actions] == [
+                ("review", ["synta-derive"], [])]
+            assert app.query_one("#tabs").active == "table"
+            assert app.query_one("#result-table").row_count == 0
+            acts = app.query_one("#result-actions", OptionList)
+            app.on_option_list_option_selected(
+                OptionList.OptionSelected(acts, acts.get_option_at_index(0), 0))
+            await app._rebuild.wait()
+            # selecting it opens 'review' with the crate already picked
+            assert app._cmd == "review"
+            assert app.query_one(f"#{app._wid('pk-synta-derive')}").value is True
 
     asyncio.run(drive())
