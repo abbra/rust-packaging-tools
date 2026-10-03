@@ -1211,6 +1211,41 @@ def test_parse_copr_status_output_reads_the_ladder():
     assert rd.parse_copr_status_output(["nothing here"]) == []
 
 
+def test_tests_table_comments_and_replace(tmp_path):
+    text = ('[package]\nsummary = "x"\n\n[tests]\nrun = ["lib"]\n'
+            'skip."test:x" = ["a"]\nskip-exact."test:x" = true\n'
+            'comments = [\n    "TODO: explain why test:x is disabled (fails at runtime)",\n]\n'
+            '\n[features]\nui = []\n')
+    assert rd.tests_table_comments(text) == [
+        "TODO: explain why test:x is disabled (fails at runtime)"]
+    new = rd.replace_tests_comments(text, ["test:x needs a network; %cargo_test skips it"])
+    # only the comments array changes; the rest of the file and table is untouched
+    assert new.startswith('[package]\nsummary = "x"\n\n[tests]\nrun = ["lib"]\n')
+    assert 'comments = [\n    "test:x needs a network; %cargo_test skips it",\n]' in new
+    assert "[features]" in new and "TODO" not in new
+    # a table without a comments array is left alone
+    plain = '[tests]\nrun = false\n'
+    assert rd.tests_table_comments(plain) == []
+    assert rd.replace_tests_comments(plain, ["x"]) == plain
+
+
+def test_tui_stage_marks_unexplained_tests_tables(tmp_path):
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    (tmp_path / "a" / "rust2rpm.toml").write_text(
+        '[tests]\nrun = false\ncomments = [\n'
+        '    "TODO: explain why doc is disabled (fails at runtime)",\n]\n')
+    pkg = rd.local_packages(tmp_path)["a"]
+    assert rd.tui_stage(pkg).name == "tests-todo"
+    assert rd.tests_todo_crates(tmp_path) == ["a"]
+    # the stage edge is the in-UI editor, not another trial
+    assert [(c, cr) for c, cr, _, _, _ in rd.tui_suggestions(tmp_path)] == [("tests-edit", ["a"])]
+    # an explained table leaves the stage behind
+    (tmp_path / "a" / "rust2rpm.toml").write_text(
+        rd.replace_tests_comments((tmp_path / "a" / "rust2rpm.toml").read_text(),
+                                  ["doc tests need network"]))
+    assert rd.tui_stage(rd.local_packages(tmp_path)["a"]).name == "srpm?"
+
+
 def test_tui_app_jumps_prefill_option_values(tmp_path):
     pytest.importorskip("textual")
     from textual.widgets import Input
@@ -1546,5 +1581,52 @@ def test_tui_app_tool_proposed_steps_become_jumps(tmp_path):
             # selecting it opens 'review' with the crate already picked
             assert app._cmd == "review"
             assert app.query_one(f"#{app._wid('pk-synta-derive')}").value is True
+
+    asyncio.run(drive())
+
+
+def test_tui_app_tests_editor_writes_reasons(tmp_path):
+    pytest.importorskip("textual")
+    from textual.widgets import ContentSwitcher, Input, OptionList, Static
+    app_class = rd.make_tui_app()
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    (tmp_path / "a" / "rust2rpm.toml").write_text(
+        '[tests]\nrun = false\ncomments = [\n'
+        '    "TODO: explain why doc is disabled (fails at runtime)",\n]\n')
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(140, 45)) as pilot:
+            await pilot.pause()
+            # the overview places the package on tests-todo and suggests the editor
+            assert [c for c, _, _, _, _ in app._suggestions] == ["tests-edit"]
+            suggestions = app.query_one("#suggestions", OptionList)
+            app.on_option_list_option_selected(
+                OptionList.OptionSelected(suggestions, suggestions.get_option_at_index(0), 0))
+            await app._tests_editor.wait()
+            await pilot.pause()
+            assert app.query_one("#screens", ContentSwitcher).current == "tests-edit"
+            # the TODO text arrives editable, with the table itself as context
+            assert "run = false" in app.query_one("#tests-edit-table", Static).content
+            editor = app.query_one("#tests-edit-rows")
+            assert len(editor.query(Input)) == 1
+            editor.query(Input).first().value = "doc tests need network; %cargo_test skips them"
+            app._save_tests_reasons()
+            await pilot.pause()
+            text = (tmp_path / "a" / "rust2rpm.toml").read_text()
+            assert "TODO" not in text and "doc tests need network" in text
+            assert 'run = false' in text
+            # the package leaves the stage: the overview now suggests the SRPM
+            assert [c for c, _, _, _, _ in app._suggestions] == ["srpm"]
+            # and the editor offers the follow-up jump
+            assert [c for c, _, _, _, _ in app._tests_actions] == ["regen", "srpm"]
+            acts = app.query_one("#tests-actions", OptionList)
+            app.on_option_list_option_selected(
+                OptionList.OptionSelected(acts, acts.get_option_at_index(0), 0))
+            await app._rebuild.wait()
+            await pilot.pause()
+            assert app.query_one("#screens", ContentSwitcher).current == "work"
+            assert app._cmd == "regen"
+            assert app.query_one(f"#{app._wid('pk-a')}").value is True
 
     asyncio.run(drive())
