@@ -1655,11 +1655,18 @@ def test_config(pkg: LocalPackage) -> dict:
 SHELL_SAFE_SKIP = re.compile(r"[A-Za-z0-9_:./+=,@-]+")
 
 
+def skip_names(skip) -> list[str]:
+    """All skip filters of a [tests] skip value: a list, a per-target table, or a lone string."""
+    if isinstance(skip, str):
+        return [skip]
+    if isinstance(skip, dict):
+        return [n for v in skip.values() for n in skip_names(v)]
+    return list(skip)
+
+
 def unsafe_skips(cfg: dict) -> list[str]:
     """Skip filters of a [tests] table that would break the %check shell command."""
-    skip = cfg.get("skip", [])
-    names = skip if isinstance(skip, list) else [n for v in skip.values() for n in v]
-    return [n for n in names if not SHELL_SAFE_SKIP.fullmatch(n)]
+    return [n for n in skip_names(cfg.get("skip", [])) if not SHELL_SAFE_SKIP.fullmatch(n)]
 
 
 def unsafe_skips_message(crate: str, names: list[str]) -> str:
@@ -1704,7 +1711,7 @@ def spec_invocations(pkg: LocalPackage) -> list[tuple[str, list[str]]]:
     skip, exact = cfg.get("skip", []), cfg.get("skip-exact", False)
     out = []
     for t in runs:
-        s = skip if isinstance(skip, list) else skip.get(t, [])
+        s = skip.get(t, []) if isinstance(skip, dict) else skip_names(skip)
         e = exact if isinstance(exact, bool) else exact.get(t, False)
         harness = (["--exact"] if e and s else []) + [a for x in s for a in ("--skip", x)]
         out.append((t or "all", (target_args(t) if t else []) + (["--", *harness] if harness else [])))
