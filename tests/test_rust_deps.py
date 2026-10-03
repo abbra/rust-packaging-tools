@@ -5,6 +5,8 @@ rust-deps is a script without a .py suffix; load it as a module.
 
 import importlib.machinery
 import importlib.util
+import argparse
+import asyncio
 import json
 import subprocess
 import sys
@@ -783,3 +785,422 @@ def test_cli_reports_network_failure(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "network request failed" in err and "Traceback" not in err
     assert e.value.code == 1
+
+
+# ─── tui ─────────────────────────────────────────────────────────────────────
+
+def _subcommand_parsers():
+    parser = rd.build_parser()
+    action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    return action.choices
+
+
+def test_tui_forms_cover_every_subcommand():
+    parsers = _subcommand_parsers()
+    assert "tui" in parsers  # the UI is a command of the CLI it presents
+    for name, sp in parsers.items():
+        if name == "tui":
+            continue
+        fields = rd.tui_fields(sp)
+        actions = [a for a in sp._actions
+                   if a.dest != "help" and not isinstance(a, argparse._SubParsersAction)]
+        assert [f.dest for f in fields] == [a.dest for a in actions], name
+        assert len({f.key for f in fields}) == len(fields), name  # widget ids stay unique
+        assert all(f.kind in ("text", "multi", "number", "flag") for f in fields), name
+
+
+def test_tui_fields_disambiguate_shared_dests():
+    # 'regen' has --compat and --no-compat sharing dest 'compat' (mutually exclusive)
+    fields = rd.tui_fields(_subcommand_parsers()["regen"])
+    compat = [f for f in fields if f.dest == "compat"]
+    assert [f.key for f in compat] == ["compat", "compat-2"]
+    assert [f.options[0] for f in compat] == ["--compat", "--no-compat"]
+    argv = rd.tui_argv(fields, {f.key: f.key == "compat-2" for f in fields if f.kind == "flag"}
+                       | {f.key: "" for f in fields if f.kind != "flag"})
+    assert argv == ["--no-compat"]
+
+
+def test_tui_controls_cover_every_field_exactly_once():
+    for name, sp in _subcommand_parsers().items():
+        if name == "tui":
+            continue
+        fields = rd.tui_fields(sp)
+        covered = [f for c in rd.tui_controls(sp) for f in c.fields]
+        assert len(covered) == len(fields), name
+        assert sorted(f.key for f in covered) == sorted(f.key for f in fields), name
+
+
+def test_tui_controls_shape_parser_structure():
+    controls = rd.tui_controls(_subcommand_parsers()["regen"])
+    shape = [(c.kind, [f.key for f in c.fields]) for c in controls]
+    # with_sel positional + --all become one picker; each exclusive group one choice control
+    assert shape == [
+        ("crates", ["crates", "all"]),
+        ("choice", ["latest", "version", "crate_file"]),
+        ("choice", ["compat", "compat-2"]),
+    ]
+    # repeatable options become multi controls; a flag-only command has no controls beyond fields
+    assert [c.kind for c in rd.tui_controls(_subcommand_parsers()["check-targets"])
+            if c.kind == "multi"] == ["multi"]
+    assert [c.kind for c in rd.tui_controls(_subcommand_parsers()["doctor"])] == []
+    # resolve/init have the positional but no --all: the picker covers the positional alone
+    assert [c.fields[0].dest for c in rd.tui_controls(_subcommand_parsers()["resolve"])
+            if c.kind == "crates"] == ["crates"]
+
+
+def test_tui_missing_required_gates_the_run():
+    cf = rd.tui_fields(_subcommand_parsers()["copr"])
+    empty = {f.key: "" for f in cf} | {f.key: False for f in cf if f.kind == "flag"}
+    assert rd.tui_missing_required(cf, empty) == ["--project"]
+    assert rd.tui_missing_required(cf, empty | {"project": "u/p"}) == []
+    inf = rd.tui_fields(_subcommand_parsers()["init"])
+    assert rd.tui_missing_required(inf, {"crates": "  "}) == ["CRATE[@REQ]"]
+    assert rd.tui_missing_required(inf, {"crates": "serde"}) == []
+
+
+def test_parse_trial_output_reads_trial_blocks():
+    lines = [
+        "== trial synta 0.4.0 (log: /home/u/.cache/rust-packaging-tools/trial/synta.log)",
+        "   all                      FAILED  0 passed, 0 failed",
+        "      error[E0432]: unresolved import `synta_certificate`",
+        "      error: could not compile `synta` (example \"asn1parse\") due to 1 previous error",
+        "== trial synta-mtc 0.4.0 (log: /home/u/.cache/rust-packaging-tools/trial/synta-mtc.log)",
+        "   all                      ok      530 passed, 0 failed",
+        "   tests/ui                 skipped needs feature(s) ui",
+        "   tests/broken            BROKEN  cargo test failed",
+        "   all test targets pass; no [tests] restrictions needed",
+    ]
+    rows = rd.parse_trial_output(lines)
+    assert [(r["crate"], r["target"], r["status"]) for r in rows] == [
+        ("synta", "all", "FAILED"), ("synta-mtc", "all", "ok"),
+        ("synta-mtc", "tests/ui", "skipped"), ("synta-mtc", "tests/broken", "BROKEN")]
+    assert rows[0]["detail"].startswith("error[E0432]")
+    assert rows[1]["detail"] == ""
+    assert rows[0]["log"].endswith("synta.log")
+
+
+def test_tui_trial_actions_turns_verdicts_into_next_steps():
+    rows = rd.parse_trial_output([
+        "== trial a 1.0 (log: /l/a.log)", "   all                      ok      2 passed, 0 failed",
+        "== trial b 1.0 (log: /l/b.log)", "   all                      FAILED  0 passed, 0 failed",
+        "      error: could not compile",
+    ])
+    actions = rd.tui_trial_actions(rows)
+    assert ("trial", ["b"], ["discover"], actions[0][3]) == actions[0]
+    assert "discover" in actions[0][2]
+    assert ("srpm", ["a"], [], actions[1][3]) == actions[1]
+
+
+def test_parse_trial_output_marks_discovery_and_recheck_blocks():
+    rows = rd.parse_trial_output([
+        "== trial a 1.0 (log: /l/a.log)",
+        "   test:x                     FAILED  0 passed, 1 failed",
+        "Suggested [tests] table for rust2rpm.toml (replace the TODO comments with real reasons):",
+        "[tests]",
+        "run = []",
+        "   Written to /r/a/rust2rpm.toml; regenerating the spec and re-running the trial.",
+        "== trial a 1.0 (log: /l/a.recheck.log)",
+        "   all                      ok      2 passed, 0 failed",
+    ])
+    assert [(r["crate"], r["mode"], r["applied"]) for r in rows] == [
+        ("a", "discover", True), ("a", "recheck", False)]
+
+
+def test_tui_trial_actions_chain_discovery_to_apply_and_regen():
+    discovered = rd.parse_trial_output([
+        "== trial a 1.0 (log: /l/a.log)",
+        "   test:x                     FAILED  0 passed, 1 failed",
+        "Suggested [tests] table for rust2rpm.toml:",
+    ])
+    actions = rd.tui_trial_actions(discovered)
+    assert actions[0][:3] == ("trial", ["a"], ["discover", "apply"])
+    assert "rechecks" in actions[0][3]
+    applied_ok = rd.parse_trial_output([
+        "== trial a 1.0 (log: /l/a.log)",
+        "   test:x                     FAILED  0 passed, 1 failed",
+        "Suggested [tests] table for rust2rpm.toml:",
+        "   Written to /r/a/rust2rpm.toml; regenerating the spec and re-running the trial.",
+        "== trial a 1.0 (log: /l/a.recheck.log)",
+        "   all                      ok      2 passed, 0 failed",
+    ])
+    actions = rd.tui_trial_actions(applied_ok)
+    assert actions[0][:3] == ("regen", ["a"], [])
+    assert "TODO" in actions[0][3]
+    applied_bad = rd.parse_trial_output([
+        "== trial a 1.0 (log: /l/a.log)",
+        "   test:x                     FAILED  0 passed, 1 failed",
+        "Suggested [tests] table for rust2rpm.toml:",
+        "   Written to /r/a/rust2rpm.toml; regenerating the spec and re-running the trial.",
+        "== trial a 1.0 (log: /l/a.recheck.log)",
+        "   all                      FAILED  0 passed, 1 failed",
+    ])
+    actions = rd.tui_trial_actions(applied_bad)
+    assert actions[0][:3] == ("trial", ["a"], ["discover"])
+    assert "still fails" in actions[0][3]
+
+
+def test_tui_package_rows_reports_tree_state(tmp_path):
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    make_package(tmp_path, "b", "rust-b", "0.2.0")
+    (tmp_path / "b" / "rust2rpm.toml").write_text("[tests]\n")
+    (tmp_path / "b" / "b-fix-metadata.diff").write_text("x")
+    (tmp_path / "b" / "rust-b-0.2.0-1.fc45.src.rpm").write_text("")
+    headers, rows = rd.tui_package_rows(tmp_path)
+    assert headers == ["crate", "version", "spec", "patch", "srpm", "tests", "review", "scope"]
+    assert rows[0] == ["a", "0.1.0", "yes", "-", "-", "-", "-", "everywhere"]
+    assert rows[1] == ["b", "0.2.0", "yes", "yes", "yes", "yes", "-", "everywhere"]
+
+
+def test_tui_suggestions_follow_the_workflow(tmp_path):
+    assert [c for c, _, _, _ in rd.tui_suggestions(tmp_path)] == ["resolve", "init"]
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    cmds = {c: (crates, flags) for c, crates, flags, _ in rd.tui_suggestions(tmp_path)}
+    assert cmds["trial"][0] == ["a"] and cmds["srpm"][0] == ["a"]  # no [tests], no SRPM yet
+    assert cmds["trial"][1] == ["discover"] and cmds["srpm"][1] == []
+    (tmp_path / "a" / "rust2rpm.toml").write_text("[tests]\n")
+    (tmp_path / "a" / "rust-a-0.1.0-1.fc45.src.rpm").write_text("")
+    cmds = {c: (crates, flags) for c, crates, flags, _ in rd.tui_suggestions(tmp_path)}
+    assert "trial" not in cmds and "srpm" not in cmds
+    assert cmds["review-plan"][0] == ["a"] and "status" in cmds
+
+
+def test_tui_argv_from_form_values():
+    fields = rd.tui_fields(_subcommand_parsers()["status"])
+    argv = rd.tui_argv(fields, {"crates": "serde jsonschema", "all": False, "target": "fedora-44",
+                                "project": "", "all_versions": True, "refresh": False})
+    assert argv == ["serde", "jsonschema", "--chroot", "fedora-44", "--all-versions"]
+
+
+def test_tui_argv_repeats_append_options_and_skips_empty_fields():
+    fields = rd.tui_fields(_subcommand_parsers()["resolve"])
+    argv = rd.tui_argv(fields, {"crates": "jsonschema@^1", "manifest": "/a/Cargo.toml /b/Cargo.toml",
+                                "ignore_local": True, "local_root": "", "json": False,
+                                "target": "fedora-44-x86_64", "refresh": False})
+    assert argv == ["jsonschema@^1", "--manifest", "/a/Cargo.toml", "--manifest", "/b/Cargo.toml",
+                    "--ignore-local", "--chroot", "fedora-44-x86_64"]
+
+
+def test_tui_fields_prefill_defaults_and_type_numbers():
+    fields = {f.dest: f for f in rd.tui_fields(_subcommand_parsers()["mock-chain"])}
+    assert fields["chroot"].default == "fedora-rawhide-x86_64"
+    fields = {f.dest: f for f in rd.tui_fields(_subcommand_parsers()["trial"])}
+    assert fields["timeout"].kind == "number" and fields["timeout"].default == "900"
+
+
+def test_parse_columns_table_reads_status_output():
+    lines = ["crate  packaged  crates.io  fedora-45  patch  srpm",
+             "serde  1.0.217  1.0.220 *  -  yes  -",
+             "jsonschema (compat)  0.58.0  0.58.0  0.58.0=  -  yes",
+             "",
+             "* = newer version on crates.io ('rust-deps update <crate>' to update)"]
+    assert rd.parse_columns_table(lines) == (
+        ["crate", "packaged", "crates.io", "fedora-45", "patch", "srpm"],
+        [["serde", "1.0.217", "1.0.220 *", "-", "yes", "-"],
+         ["jsonschema (compat)", "0.58.0", "0.58.0", "0.58.0=", "-", "yes"]])
+
+
+def test_parse_columns_table_ignores_free_form_output():
+    assert rd.parse_columns_table(["== serde 1.0.217", "   rust2rpm --features default",
+                                   "   ok", "NEW       serde 1.0  <- jsonschema"]) is None
+
+
+def test_parse_state_table_reads_doctor_output():
+    lines = ["   ok      rust2rpm   /usr/sbin/rust2rpm",
+             "   absent  mock       mock (for mock-chain)",
+             "   root    /tmp/packages (0 packages)"]
+    assert rd.parse_state_table(lines) == (
+        ["state", "tool", "detail"],
+        [["ok", "rust2rpm", "/usr/sbin/rust2rpm"],
+         ["absent", "mock", "mock (for mock-chain)"],
+         ["root", "/tmp/packages", "(0 packages)"]])
+
+
+def test_parse_state_table_rejects_other_output():
+    assert rd.parse_state_table(["crate  packaged  crates.io", "serde  1.0  -"]) is None
+
+
+def test_parse_json_table_shapes():
+    assert rd.parse_json_table([["serde", "syn"], ["jsonschema"]]) == (
+        ["stage", "packages"], [["1", "serde syn"], ["2", "jsonschema"]])
+    headers, rows = rd.parse_json_table([{"crate": "serde", "needed_by": ["jsonschema"]},
+                                         {"crate": "syn", "needed_by": []}])
+    assert headers == ["crate", "needed_by"]
+    assert rows == [["serde", '["jsonschema"]'], ["syn", "[]"]]
+    assert rd.parse_json_table({"a": 1, "b": None}) == (["key", "value"], [["a", "1"], ["b", ""]])
+    assert rd.parse_json_table([]) is None
+
+
+@pytest.mark.parametrize("line, style", [
+    ("ERROR: nope", "bold red"),
+    ("ACTION NEEDED: serde: license", "bold magenta"),
+    ("WARNING: x", "yellow"),
+    ("== serde 1.0.217", "bold cyan"),
+    ("=== stage 2", "bold cyan"),
+    ("$ mock --chain ...", "dim"),
+    ("NEW       serde 1.0.220  <- jsonschema", "cyan"),
+    ("   MISSING  fedora-44", "bold red"),
+    ("   ok       fedora-rawhide", "green"),
+    ("   BUILDING fedora-44-x86_64", "yellow"),
+    ("   [!] some check", "bold red"),
+    ("   [~] cargo metadata", "dim yellow"),
+    ("summary: 3 ok, 1 failed", "bold"),
+    ("plain line", ""),
+])
+def test_tui_line_style(line, style):
+    assert rd.tui_line_style(line) == style
+
+
+def test_tui_app_lists_and_runs_commands(tmp_path):
+    pytest.importorskip("textual")
+    from textual.widgets import Checkbox, Input, Select
+    app_class = rd.make_tui_app()
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            options = app.query_one("#commands")
+            listed = {options.get_option_at_index(i).id for i in range(options.option_count)}
+            assert set(_subcommand_parsers()) - {"tui"} <= listed
+            await pilot.press("down", "down", "enter")  # Overview is the first entry; then doctor
+            await pilot.pause()
+            assert app._cmd == "doctor"
+            await pilot.press("ctrl+r")
+            run_btn = app.query_one("#run")
+            for _ in range(600):  # doctor probes the environment; allow 30s
+                await pilot.pause(0.05)
+                if not run_btn.disabled:
+                    break
+            assert not run_btn.disabled, "the command did not finish"
+            # doctor's state lines are rendered as a table and the Table tab opens
+            assert app.query_one("#result-table").row_count >= 3
+            assert app.query_one("#tabs").active == "table"
+            # 'regen' renders its two mutually exclusive groups as choice controls
+            app._show("regen")
+            await app._rebuild.wait()
+            app.query_one(f"#{app._wid('g-1')}", Select).value = "compat-2"
+            await pilot.pause()
+            assert app._argv() == ["--no-compat"]
+            # 'status' offers the tree's packages as checkboxes
+            app._show("status")
+            await app._rebuild.wait()
+            app.query_one(f"#{app._wid('pk-a')}", Checkbox).value = True
+            await pilot.pause()
+            assert "a" in app._argv()
+            # required options gate Run: 'copr' needs --project
+            app._show("copr")
+            await app._rebuild.wait()
+            assert app.query_one("#run").disabled
+            app.query_one(f"#{app._wid('f-project')}", Input).value = "u/p"
+            await pilot.pause()
+            assert not app.query_one("#run").disabled
+
+    asyncio.run(drive())
+
+
+def test_tui_app_form_splits_crates_and_options_into_panes(tmp_path):
+    pytest.importorskip("textual")
+    from textual.widgets import Checkbox, ContentSwitcher
+    app_class = rd.make_tui_app()
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#screens", ContentSwitcher).current = "work"
+            await pilot.pause()
+            # a command with both: picker and options sit side by side, both visible
+            app._show("trial")
+            await app._rebuild.wait()
+            await pilot.pause()
+            crates = app.query_one("#form-crates")
+            options = app.query_one("#form-options")
+            assert crates.display and options.display
+            assert crates.region.x < options.region.x, "the panes are stacked, not side by side"
+            assert app.query_one(f"#{app._wid('pk-a')}", Checkbox).parent is crates
+            discover = app.query_one(f"#{app._wid('f-discover')}", Checkbox)
+            assert discover.parent is options
+            # flags read like the crate rows: one per line, short help inline
+            assert "try all test targets" in discover.label.plain
+            # a command without a picker hides the crates pane entirely
+            app._show("copr-log")
+            await app._rebuild.wait()
+            await pilot.pause()
+            assert not crates.display and options.display
+
+    asyncio.run(drive())
+
+
+def test_tui_app_overview_jumps_with_crates_picked(tmp_path):
+    pytest.importorskip("textual")
+    from textual.widgets import ContentSwitcher, DataTable, OptionList
+    app_class = rd.make_tui_app()
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # the app opens on the Overview, showing the tree state
+            assert app.query_one("#screens", ContentSwitcher).current == "overview"
+            assert app.query_one("#pkg-table", DataTable).row_count == 1
+            # a package without [tests] and without an SRPM suggests exactly trial, then srpm
+            assert [c for c, _, _, _ in app._suggestions] == ["trial", "srpm"]
+            suggestions = app.query_one("#suggestions", OptionList)
+            app.on_option_list_option_selected(
+                OptionList.OptionSelected(suggestions, suggestions.get_option_at_index(0), 0))
+            await app._rebuild.wait()
+            assert app.query_one("#screens", ContentSwitcher).current == "work"
+            assert app._cmd == "trial"
+            # the suggested crates arrive picked in the form
+            assert app.query_one(f"#{app._wid('pk-a')}").value is True
+            # the suggested flags arrive set too, and --timeout shows its CLI default
+            assert app._argv() == ["a", "--discover", "--timeout", "900"]
+
+    asyncio.run(drive())
+
+
+def test_tui_app_trial_results_drive_next_steps(tmp_path):
+    pytest.importorskip("textual")
+    from textual.widgets import DataTable, OptionList
+    app_class = rd.make_tui_app()
+    make_package(tmp_path, "synta", "rust-synta", "0.4.0")
+    trial_lines = [
+        "== trial synta 0.4.0 (log: /home/u/.cache/rust-packaging-tools/trial/synta.log)",
+        "   all                      FAILED  0 passed, 0 failed",
+        "      error[E0432]: unresolved import `synta_certificate`",
+        "Suggested [tests] table for rust2rpm.toml (replace the TODO comments with real reasons):",
+        "[tests]",
+        "run = []",
+    ]
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(140, 45)) as pilot:
+            await pilot.pause()
+            app._show("trial")
+            await app._rebuild.wait()
+            app._stdout = trial_lines
+            app._render_structured()
+            await pilot.pause()
+            # the verdict lines become a table and the Table tab opens
+            assert app.query_one("#result-table", DataTable).row_count == 1
+            assert app.query_one("#tabs").active == "table"
+            # the suggested [tests] table becomes an apply-and-recheck next step
+            assert [(c, cr, fl) for c, cr, fl, _ in app._result_actions] == [
+                ("trial", ["synta"], ["discover", "apply"])]
+            acts = app.query_one("#result-actions", OptionList)
+            app.on_option_list_option_selected(
+                OptionList.OptionSelected(acts, acts.get_option_at_index(0), 0))
+            await app._rebuild.wait()
+            # selecting it reopens trial with the crate picked and both flags set
+            assert app._cmd == "trial"
+            assert app.query_one(f"#{app._wid('pk-synta')}").value is True
+            assert app.query_one(f"#{app._wid('f-discover')}").value is True
+            assert app.query_one(f"#{app._wid('f-apply')}").value is True
+            argv = app._argv()
+            assert "--discover" in argv and "--apply" in argv
+
+    asyncio.run(drive())
