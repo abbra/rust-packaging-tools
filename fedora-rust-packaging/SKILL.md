@@ -66,6 +66,9 @@ Read them as follows (forms can be combined with `--root <dir>`):
    the `mock` group, the current session may not have it yet: run mock
    commands through `sg mock -c '…'`.
 
+   `rust-deps tui` is an interactive terminal UI for people (needs
+   `python3-textual`); as an agent, use the command forms, never `tui`.
+
 ## Rules
 
 - **Never edit generated files:** `rust-<crate>.spec`, `*-fix-metadata*.diff`.
