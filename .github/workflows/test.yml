@@ -22,7 +22,7 @@ jobs:
     container: registry.fedoraproject.org/fedora:44
     steps:
       - name: Install dependencies
-        run: dnf -y install --setopt=install_weak_deps=False git-core python3 python3-pytest python3-pyyaml rust2rpm shellcheck
+        run: dnf -y install --setopt=install_weak_deps=False git-core python3 python3-pytest python3-pyyaml python3-textual rust2rpm shellcheck
       - uses: actions/checkout@v4
       - name: Compile
         run: python3 -m py_compile fedora-rust-packaging/scripts/rust-deps
