@@ -1311,6 +1311,56 @@ def test_update_dry_run_becomes_an_apply_jump():
     assert rd.render_update_output(["== zmij 0.9.0 -> 1.0.0"], Path("/unused"))[1] == []
 
 
+def test_render_order_output_shows_the_ladder():
+    parsed, actions = rd.render_order_output(
+        ["stage 1: zmij synta-derive", "stage 2: synta"], Path("/unused"))
+    assert parsed == (["stage", "packages"],
+                      [["1", "zmij synta-derive"], ["2", "synta"]])
+    assert actions == []
+    assert rd.render_order_output(["no stages here"], Path("/unused")) == (None, [])
+
+
+def test_parse_tool_states_reads_doctor_tools():
+    lines = ["   ok      rust2rpm   /usr/sbin/rust2rpm",
+             "   absent  mock       mock (for mock-chain)",
+             "   ok      copr-cli   /usr/bin/copr-cli",
+             "   root    /tmp/packages (0 packages)"]
+    assert rd.parse_tool_states(lines) == {"rust2rpm": True, "mock": False, "copr-cli": True}
+    assert rd.parse_tool_states(["crate  packaged"]) == {}
+
+
+def test_tui_app_sidebar_gates_commands_on_missing_tools(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    app_class = rd.make_tui_app()
+    # a deterministic environment: mock and fedora-review absent, copr-cli present
+    monkeypatch.setattr(rd, "parse_tool_states",
+                        lambda lines: {"mock": False, "copr-cli": True,
+                                       "fedora-review": False, "fedpkg": False})
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            options = app.query_one("#commands")
+
+            def option(name):
+                for i in range(options.option_count):
+                    o = options.get_option_at_index(i)
+                    if o.id == name:
+                        return o
+                raise AssertionError(f"{name} is not listed")
+
+            for _ in range(600):  # the probe runs 'doctor' as a subprocess
+                await pilot.pause(0.05)
+                if option("mock-chain").disabled:
+                    break
+            assert option("mock-chain").disabled
+            assert option("review").disabled  # needs fedora-review and mock
+            assert option("dist-git").disabled
+            assert not option("copr").disabled  # copr-cli is available
+            assert not option("trial").disabled  # needs no optional tool
+
+    asyncio.run(drive())
+
 def test_tui_stage_marks_unexplained_tests_tables(tmp_path):
     make_package(tmp_path, "a", "rust-a", "0.1.0")
     (tmp_path / "a" / "rust2rpm.toml").write_text(
@@ -1415,11 +1465,13 @@ def test_tui_line_style(line, style):
     assert rd.tui_line_style(line) == style
 
 
-def test_tui_app_lists_and_runs_commands(tmp_path):
+def test_tui_app_lists_and_runs_commands(tmp_path, monkeypatch):
     pytest.importorskip("textual")
     from textual.widgets import Checkbox, Input, Select
     app_class = rd.make_tui_app()
     make_package(tmp_path, "a", "rust-a", "0.1.0")
+    # this test navigates the sidebar: keep the tool probe from rebuilding it
+    monkeypatch.setattr(rd, "parse_tool_states", lambda lines: {})
 
     async def drive():
         app = app_class(tmp_path)
