@@ -375,6 +375,8 @@ class LocalPackage:
 
 def local_packages(root: Path) -> dict[str, LocalPackage]:
     pkgs = {}
+    if not root.is_dir():
+        return pkgs  # a tree that does not exist yet has no packages
     for d in sorted(p for p in root.iterdir() if p.is_dir()):
         if not (d / "rust2rpm.toml").exists():
             continue
@@ -4107,8 +4109,12 @@ def cmd_doctor(args) -> None:
         ok = False
         info("   MISSING user namespaces with loopback: offline trials need 'unshare -rn' and "
              f"'ip link set lo up' in it (or use 'trial --online'): {res.stderr.strip()}")
-    pkgs = local_packages(args.root) if args.root.is_dir() else {}
-    info(f"   root    {args.root} ({len(pkgs)} packages)")
+    if args.root.is_dir():
+        pkgs = local_packages(args.root)
+        info(f"   root    {args.root} ({len(pkgs)} packages)")
+    else:
+        ok = False
+        info(f"   MISSING root {args.root} is not a directory (wrong --root or {ROOT_ENV}?)")
     if not ok:
         die("install the missing tools listed above")
 
@@ -4336,6 +4342,9 @@ def main() -> None:
 
     args = p.parse_args()
     args.root = args.root.resolve()
+    if args.cmd not in ("doctor", "init") and not args.root.is_dir():
+        # 'init' creates the tree; 'doctor' reports on it
+        die(f"{args.root} is not a directory (wrong --root or ${ROOT_ENV}? 'rust-deps doctor' checks the setup)")
     args.func(args)
 
 
