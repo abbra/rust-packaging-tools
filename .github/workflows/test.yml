@@ -17,7 +17,9 @@ jobs:
   unit:
     name: unit tests (offline)
     runs-on: ubuntu-latest
-    container: registry.fedoraproject.org/fedora:latest
+    timeout-minutes: 15
+    # pinned: bump together with the Fedora release the packaging targets use
+    container: registry.fedoraproject.org/fedora:44
     steps:
       - name: Install dependencies
         run: dnf -y install --setopt=install_weak_deps=False git-core python3 python3-pytest python3-pyyaml rust2rpm
@@ -30,8 +32,9 @@ jobs:
   smoke:
     name: smoke test (crates.io, Fedora mirrors)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     container:
-      image: registry.fedoraproject.org/fedora:latest
+      image: registry.fedoraproject.org/fedora:44
       # trial runs tests offline in a user namespace (unshare -rn), as mock does
       options: --privileged
     steps:
