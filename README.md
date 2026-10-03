@@ -125,7 +125,8 @@ mutually exclusive options (`regen --latest/--version/--crate-file`,
 `--manifest`, `--koji-task`, …) are add/remove rows, and required arguments
 gate the Run button. The exact `rust-deps …` command line is shown live as
 you fill the form. Output streams into the view — diagnostics colored,
-`status`, `doctor`, `trial` and any `--json` result rendered as tables.
+`status`, `doctor`, `trial`, `srpm` and any `--json` result rendered as
+tables, and a run whose output has no table shape stays in the Log view.
 Results feed back into the UI: a `trial` run becomes a verdict table (crate,
 target, status, summary, first error) with next steps under it, following the
 discovery workflow: plain failures go to `--discover`, a suggested `[tests]`
