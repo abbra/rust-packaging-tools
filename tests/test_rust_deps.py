@@ -6,12 +6,14 @@ rust-deps is a script without a .py suffix; load it as a module.
 import importlib.machinery
 import importlib.util
 import json
+import subprocess
 import sys
 import urllib.error
 import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 SCRIPT = Path(__file__).resolve().parent.parent / "fedora-rust-packaging" / "scripts" / "rust-deps"
 _loader = importlib.machinery.SourceFileLoader("rust_deps", str(SCRIPT))
@@ -524,11 +526,10 @@ def tmt_info(**kw) -> "rd.TmtInfo":
 
 
 def fmf(text: str) -> dict:
-    yaml = pytest.importorskip("yaml")
     return yaml.safe_load(text)
 
 
-def test_render_tmt_library():
+def test_render_tmt_library(tmp_path):
     files = rd.render_tmt(tmt_info())
     assert files[".fmf/version"] == "1\n"
     plan = fmf(files["plans/rust-deps.fmf"])
@@ -540,7 +541,11 @@ def test_render_tmt_library():
     assert "(crate(rand/default) >= 0.9.0 with crate(rand/default) < 0.10.0~)" in tests["/upstream-tests"]["require"]
     assert files["tests/rust-deps/check-commands"] == "%cargo_test -- --lib\n%cargo_test -- --doc\n"
     for script in ("features.sh", "upstream-tests.sh"):
-        assert files[f"tests/rust-deps/{script}"].startswith("#!/usr/bin/bash\n")
+        content = files[f"tests/rust-deps/{script}"]
+        assert content.startswith("#!/usr/bin/bash\n")
+        path = tmp_path / script
+        path.write_text(content)
+        subprocess.run(["bash", "-n", str(path)], check=True)  # the generated shell must parse
 
 
 def test_render_tmt_without_tests_or_library():
