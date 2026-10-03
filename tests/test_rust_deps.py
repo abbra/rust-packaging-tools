@@ -1327,6 +1327,11 @@ def test_parse_tool_states_reads_doctor_tools():
              "   root    /tmp/packages (0 packages)"]
     assert rd.parse_tool_states(lines) == {"rust2rpm": True, "mock": False, "copr-cli": True}
     assert rd.parse_tool_states(["crate  packaged"]) == {}
+    # the 'mock group' warning is a setup hint, not a missing tool
+    lines = ["   ok      mock       /usr/bin/mock",
+             "   WARNING mock group (sudo usermod -aG mock $USER, then log in again)",
+             "   root    /tmp/packages (0 packages)"]
+    assert rd.parse_tool_states(lines) == {"mock": True}
 
 
 def test_tui_app_sidebar_gates_commands_on_missing_tools(tmp_path, monkeypatch):
