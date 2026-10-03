@@ -4522,7 +4522,7 @@ def parse_srpm_output(lines: list[str]) -> list[dict]:
 # Blocks that name the package a suggestion belongs to: review-plan's numbered
 # steps, review-status' and srpm's '== pkg' headers, copr-status' 'crate evr:'
 # lines; tree-level bullets and stage headers clear the context.
-_SUGGEST_STEP_RE = re.compile(r"^\s*\d+\. (\S+) (\S+)\s+(?:FILED|READY|NOT READY|update)$")
+_SUGGEST_STEP_RE = re.compile(r"^\s*\d+\. (\S+) (\S+)\s+(FILED|READY|NOT READY|update)$")
 _SUGGEST_BLOCK_RE = re.compile(r"^== ([^\s:]+)(?::| \S+)")
 _SUGGEST_COPR_RE = re.compile(r"^(\S+) (\S+): (?:build \S+|no COPR build of this version)$")
 _SUGGEST_RESET_RE = re.compile(r"^(?:- |summary:|Submit in this order|=== stage|no review needed:|other specs)")
@@ -4773,12 +4773,162 @@ def render_copr_status_output(lines: list[str], root: Path):
     return parsed, []
 
 
+_PLAN_STAGE_RE = re.compile(r"^=== stage (\d+)$")
+_PLAN_AFTER_RE = re.compile(r"^       after: (.*)$")
+
+
+def parse_review_plan_output(lines: list[str]) -> list[dict]:
+    """The review-plan steps as board rows: stage, package, version, state, detail, after.
+
+    The numbered step lines carry the verdict; the indented lines below a step
+    are its detail and the packages its ticket must wait for."""
+    rows: list[dict] = []
+    stage, cur = 0, None
+    for line in lines:
+        if m := _PLAN_STAGE_RE.match(line):
+            stage, cur = int(m.group(1)), None
+        elif m := _SUGGEST_STEP_RE.match(line):
+            cur = {"stage": stage, "package": m.group(1), "version": m.group(2),
+                   "state": m.group(3), "detail": "", "after": ""}
+            rows.append(cur)
+        elif cur is not None and line.startswith("       "):
+            if m := _PLAN_AFTER_RE.match(line):
+                cur["after"] = m.group(1)
+            else:
+                cur["detail"] = line.strip()
+        elif _SUGGEST_RESET_RE.match(line):
+            cur = None
+    return rows
+
+
+def render_review_plan_output(lines: list[str], root: Path):
+    rows = parse_review_plan_output(lines)
+    if not rows:
+        return None, []
+    parsed = (["stage", "package", "version", "state", "detail", "after"],
+              [[str(r["stage"]), r["package"], r["version"], r["state"], r["detail"], r["after"]]
+               for r in rows])
+    # the tool's own 'file the READY ones' line becomes the filing jump
+    return parsed, []
+
+
+_RR_HEADER_RE = re.compile(r"^== review request (\S+) (\S+)$")
+
+
+def parse_review_request_drafts(lines: list[str], root: Path) -> list[dict]:
+    """The drafts a review-request run wrote, read back from the tree: the filing gate
+    shows the Summary and the URLs a Bugzilla ticket would carry."""
+    by_name = {p.rpm_name: p for p in local_packages(root).values()}
+    rows: list[dict] = []
+    for line in lines:
+        m = _RR_HEADER_RE.match(line)
+        if not m:
+            continue
+        pkg = by_name.get(m.group(1))
+        draft = pkg.dir / REQUEST_DRAFT if pkg is not None else None
+        if draft is None or not draft.exists():
+            continue
+        text = draft.read_text()
+
+        def field(name: str) -> str:
+            fm = re.search(rf"^{name}: (.*)$", text, re.M)
+            return fm.group(1) if fm else ""
+        rows.append({"crate": pkg.crate, "version": m.group(2),
+                     "summary": field("Summary"), "spec": field("Spec URL"),
+                     "srpm": field("SRPM URL"), "filed": (pkg.dir / REQUEST_STATE).exists()})
+    return rows
+
+
+def render_review_request_output(lines: list[str], root: Path):
+    rows = parse_review_request_drafts(lines, root)
+    if not rows:
+        return None, []
+    parsed = (["crate", "version", "summary", "spec", "srpm"],
+              [[r["crate"], r["version"], r["summary"], r["spec"], r["srpm"]] for r in rows])
+    actions = []
+    unfiled = [r["crate"] for r in rows if not r["filed"]]
+    if unfiled:
+        actions.append(("review-request", unfiled, ["file"], {},
+                        "the table is what filing would post: file these drafts"))
+    return parsed, actions
+
+
+_RESOLVE_ROW_RE = re.compile(r"^(NEW|UPDATE|FEATURES)\s+(\S+) (\S+)(?: \(Fedora has [^)]*\))?  <- (.*)$")
+
+
+def parse_resolve_output(lines: list[str]) -> list[dict]:
+    rows: list[dict] = []
+    for line in lines:
+        if m := _RESOLVE_ROW_RE.match(line):
+            rows.append({"status": m.group(1), "crate": m.group(2), "version": m.group(3),
+                         "needed_by": m.group(4)})
+    return rows
+
+
+def render_resolve_output(lines: list[str], root: Path):
+    rows = parse_resolve_output(lines)
+    if not rows:
+        return None, []
+    parsed = (["status", "crate", "version", "needed by"],
+              [[r["status"], r["crate"], r["version"], r["needed_by"]] for r in rows])
+    actions = []
+    new = [r["crate"] for r in rows if r["status"] == "NEW"]
+    if new:
+        # the names are not packages yet: they arrive in init's 'other crates' field,
+        # and the target chroot carries over from this resolve run
+        actions.append(("init", new, ["recursive"], {},
+                        "not in Fedora or the tree: init --recursive creates the packages"))
+    return parsed, actions
+
+
+_UPDATE_PLAN_RE = re.compile(r"^Updates, in build order: (.*)$")
+_UPDATE_PAIR_RE = re.compile(r"^(\S+) (\S+) -> (\S+)$")
+_UPDATE_DONE_RE = re.compile(r"^== (\S+) (\S+) -> (\S+)$")
+_UPDATE_BLOCKED_RE = re.compile(r"^== (\S+): (.*)$")
+
+
+def parse_update_output(lines: list[str]) -> list[dict]:
+    """The update decision as rows: what a dry run plans, what a run did, what is blocked."""
+    by: dict[str, dict] = {}
+    for line in lines:
+        if m := _UPDATE_PLAN_RE.match(line):
+            for item in m.group(1).split(", "):
+                if pm := _UPDATE_PAIR_RE.match(item):
+                    by[pm.group(1)] = {"crate": pm.group(1), "from": pm.group(2),
+                                       "to": pm.group(3), "note": ""}
+        elif m := _UPDATE_DONE_RE.match(line):
+            by[m.group(1)] = {"crate": m.group(1), "from": m.group(2),
+                              "to": m.group(3), "note": "updated"}
+        elif m := _UPDATE_BLOCKED_RE.match(line):
+            by.setdefault(m.group(1), {"crate": m.group(1), "from": "-", "to": "-",
+                                       "note": m.group(2)})
+    return list(by.values())
+
+
+def render_update_output(lines: list[str], root: Path):
+    rows = parse_update_output(lines)
+    if not rows:
+        return None, []
+    parsed = (["crate", "current", "target", "note"],
+              [[r["crate"], r["from"], r["to"], r["note"]] for r in rows])
+    actions = []
+    planned = [r["crate"] for r in rows if r["note"] == ""]
+    if planned:
+        actions.append(("update", planned, [], {},
+                        "the dry run listed these updates in build order: apply them"))
+    return parsed, actions
+
+
 TUI_RESULT_RENDERERS = {
     "trial": render_trial_output,
     "srpm": render_srpm_output,
     "status": render_status_output,
     "doctor": render_doctor_output,
     "copr-status": render_copr_status_output,
+    "review-plan": render_review_plan_output,
+    "review-request": render_review_request_output,
+    "resolve": render_resolve_output,
+    "update": render_update_output,
 }
 
 
@@ -4797,12 +4947,12 @@ class TuiPlaybook:
 TUI_PLAYBOOKS = {
     "doctor": TuiPlaybook(result="doctor"),
     "status": TuiPlaybook(result="status", carry=("target",)),
-    "resolve": TuiPlaybook(),
+    "resolve": TuiPlaybook(result="resolve"),
     "order": TuiPlaybook(),
     "check-targets": TuiPlaybook(carry=("chroot", "project")),
     "init": TuiPlaybook(carry=("target",)),
     "regen": TuiPlaybook(),
-    "update": TuiPlaybook(),
+    "update": TuiPlaybook(result="update"),
     "trial": TuiPlaybook(result="trial"),
     "srpm": TuiPlaybook(result="srpm"),
     "mock-chain": TuiPlaybook(requires=("mock",)),
@@ -4812,8 +4962,8 @@ TUI_PLAYBOOKS = {
                                carry=("project", "chroot")),
     "tmt": TuiPlaybook(requires=("mock",), carry=("project",)),
     "review": TuiPlaybook(requires=("fedora-review", "mock"), carry=("chroot",)),
-    "review-request": TuiPlaybook(carry=("project", "chroot")),
-    "review-plan": TuiPlaybook(carry=("project", "chroot")),
+    "review-request": TuiPlaybook(result="review-request", carry=("project", "chroot")),
+    "review-plan": TuiPlaybook(result="review-plan", carry=("project", "chroot")),
     "review-status": TuiPlaybook(),
     "adopt": TuiPlaybook(),
     "dist-git": TuiPlaybook(requires=("fedpkg",)),
