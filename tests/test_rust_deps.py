@@ -6,6 +6,7 @@ import it straight from the checkout.
 
 import argparse
 import asyncio
+import ast
 import json
 import subprocess
 import sys
@@ -781,6 +782,68 @@ def test_cli_reports_network_failure(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "network request failed" in err and "Traceback" not in err
     assert e.value.code == 1
+
+
+# ─── module references ───────────────────────────────────────────────────────
+
+def _module_api(path: Path) -> set[str]:
+    """Names a module of the package defines at its top level."""
+    api = set()
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, ast.Assign):
+            api.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name):
+            api.add(node.target.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            api.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            api.update((a.asname or a.name).split(".")[0] for a in node.names)
+    return api
+
+
+def _locally_bound(fn) -> dict[str, int]:
+    """Names a function binds itself (parameters, assignments, imports), first line each."""
+    bound: dict[str, int] = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.arg):
+            bound.setdefault(node.arg, fn.lineno)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.setdefault(node.id, node.lineno)
+        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            bound.setdefault(node.target.id, node.lineno)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                bound.setdefault((a.asname or a.name).split(".")[0], node.lineno)
+    return bound
+
+
+def test_no_local_shadows_a_sibling_module_it_then_calls():
+    """Components refer to each other as module.attr; a local of the same name makes
+    that call an UnboundLocalError (or hits the local object instead) — 'rust-deps
+    resolve' crashed in CI on 'fedora = fedora.fedora_index(...)'.
+    """
+    pkg = Path(rd.__file__).parent
+    apis = {p.stem: _module_api(p) for p in sorted(pkg.glob("*.py")) if p.stem not in ("__init__", "__main__")}
+    offenders = []
+    for path in sorted(pkg.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        imported = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for a in node.names:
+                    name = (a.asname or a.name).split(".")[0]
+                    if name in apis:
+                        imported[name] = apis[name]
+        for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            for name, bound_at in _locally_bound(fn).items():
+                if name not in imported:
+                    continue
+                for use in ast.walk(fn):
+                    if (isinstance(use, ast.Attribute) and isinstance(use.value, ast.Name)
+                            and use.value.id == name and use.attr in imported[name]):
+                        offenders.append(f"{path.name}:{use.lineno} {fn.name}() binds '{name}' at {bound_at}, "
+                                         f"then calls {name}.{use.attr}")
+    assert offenders == []
 
 
 # ─── tui ─────────────────────────────────────────────────────────────────────
