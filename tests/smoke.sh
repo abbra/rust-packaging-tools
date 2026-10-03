@@ -1,12 +1,16 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 # End-to-end run of rust-deps on a small crate from crates.io, as a packager
 # would use it: needs network access (crates.io, Fedora mirrors) and the tools
 # 'rust-deps doctor' checks.  Nothing is submitted anywhere: copr runs with -n.
 #
-#   tests/smoke.sh [CRATE@VERSION]      (default: num-cmp@0.1.0, which has no dependencies)
+#   tests/smoke.sh CRATE@VERSION      (default: num-cmp@0.1.0, which has no dependencies)
 set -euo pipefail
 
 spec=${1:-num-cmp@0.1.0}
+if [[ $spec != *@* || -z ${spec%@*} || -z ${spec#*@} || $spec == *@*@* ]]; then
+    echo "usage: tests/smoke.sh CRATE@VERSION (e.g. num-cmp@0.1.0)" >&2
+    exit 2
+fi
 crate=${spec%@*}
 version=${spec#*@}
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -27,7 +31,8 @@ step "init $crate (test discovery, table applied)"
 "${T[@]}" init --apply-tests "$crate@=$version"
 test -f "$root/$crate/rust-$crate.spec"
 test -f "$root/$crate/$crate-$version.crate"
-grep -q "^Version: *$version$" "$root/$crate/rust-$crate.spec"
+spec_version=$(sed -n 's/^Version: *//p' "$root/$crate/rust-$crate.spec")
+[[ $spec_version == "$version" ]] || { echo "spec Version is '$spec_version', expected '$version'" >&2; exit 1; }
 
 step "regen $crate"
 "${T[@]}" regen "$crate"
@@ -37,18 +42,20 @@ step "trial $crate (the spec's %cargo_test runs)"
 
 step "srpm $crate (sources, %prep, rpmlint)"
 "${T[@]}" srpm "$crate"
-ls "$root/$crate"/rust-"$crate"-"$version"-*.src.rpm
+compgen -G "$root/$crate/rust-$crate-$version-*.src.rpm" >/dev/null \
+    || { echo "no SRPM built for $crate $version" >&2; exit 1; }
 
 step order
 "${T[@]}" order --all
-"${T[@]}" order --all --json | python3 -c "import json, sys; assert json.load(sys.stdin) == [['$crate']]"
+"${T[@]}" order --all --json | python3 -c 'import json, sys; assert json.load(sys.stdin) == [[sys.argv[1]]]' "$crate"
 
 step "check-targets (Fedora Rawhide repositories)"
 "${T[@]}" check-targets --all -r fedora-rawhide-x86_64
 
 step "copr, dry run"
 "${T[@]}" copr --all -n --project example/project -r fedora-rawhide-x86_64 | tee "$root/copr.out"
-grep -q "copr-cli build --nowait -r fedora-rawhide-x86_64 example/project .*rust-$crate-$version-" "$root/copr.out"
+grep -q 'copr-cli build --nowait -r fedora-rawhide-x86_64 example/project' "$root/copr.out"
+grep -qF "rust-$crate-$version-" "$root/copr.out"
 
 step status
 "${T[@]}" status
