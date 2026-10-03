@@ -36,8 +36,9 @@ step doctor
 step "resolve $crate"
 "${T[@]}" resolve "$crate@=$version"
 
-step "init $crate (test discovery, table applied)"
-"${T[@]}" init --apply-tests "$crate@=$version"
+step "init $crate (test discovery ran)"
+"${T[@]}" init --apply-tests "$crate@=$version" | tee "$root/init.out"
+grep -qE 'Suggested \[tests\] table|all test targets pass' "$root/init.out"
 test -f "$root/$crate/rust-$crate.spec"
 test -f "$root/$crate/$crate-$version.crate"
 spec_version=$(sed -n 's/^Version: *//p' "$root/$crate/rust-$crate.spec")
@@ -47,6 +48,7 @@ step "regen $crate"
 "${T[@]}" regen "$crate"
 
 step "trial $crate (the spec's %cargo_test runs)"
+grep -q '%cargo_test' "$root/$crate/rust-$crate.spec"
 "${T[@]}" trial "$crate"
 
 step "srpm $crate (sources, %prep, rpmlint)"
