@@ -107,10 +107,12 @@ rust-deps tui                                        # all of the above in a tex
 
 `rust-deps tui` opens the whole tool in a terminal UI (built with
 [Textual](https://github.com/Textualize/textual)): a sidebar lists every
-command in workflow order, and it opens on an **Overview**: every package
+command in workflow order — dimmed when a `doctor` probe finds the tool it
+needs missing — and it opens on an **Overview**: every package
 under the root with its stage on the packaging lifecycle graph (spec → tests
-→ SRPM → review → draft → filed, with the adopted and target-limited
-branches), and the next step the graph implies for each — selecting one jumps
+→ tests reasons → SRPM → review → draft → filed, with the adopted and
+target-limited branches), and the next step the graph implies for each —
+selecting one jumps
 to that command with the right crates already picked. The Overview refreshes
 after every run.
 The form for the selected command is built from the same argparse metadata as
@@ -124,19 +126,27 @@ mutually exclusive options (`regen --latest/--version/--crate-file`,
 `--compat/--no-compat`) are one mode choice, repeatable options (`-r`,
 `--manifest`, `--koji-task`, …) are add/remove rows, and required arguments
 gate the Run button. The exact `rust-deps …` command line is shown live as
-you fill the form. Output streams into the view — diagnostics colored,
-`status`, `doctor`, `trial`, `srpm` and any `--json` result rendered as
-tables, and a run whose output has no table shape stays in the Log view.
+you fill the form. Output streams into the view — diagnostics colored; each
+command's result renders per a declared playbook: verdict tables (`status`,
+`doctor`, `trial`, `srpm`), the review-plan board, stage ladders for `order`,
+`mock-chain` and `copr`, `copr-status` per-chroot verdicts, and any `--json`
+result as a table; a run whose output has no table shape stays in the Log
+view.
 Results feed back into the UI: a `trial` run becomes a verdict table (crate,
 target, status, summary, first error) with next steps under it, following the
 discovery workflow: plain failures go to `--discover`, a suggested `[tests]`
 table goes to `--discover --apply` (write, regenerate, recheck), a passing
-recheck goes to `regen` after the TODO reasons are filled in, and passing
-crates go to `srpm` — selecting one reopens that command with the crates
-already picked and the suggested flags set. The same applies to what any
-other command proposes in its own output: review-plan's `run 'review' first`
-on a NOT READY package, review-status' `next:` lines, and copr-status'
-resubmit command all become jumps with the right crates picked. Keys:
+recheck opens the **reason editor** (`tests-edit`): one editable row per TODO
+comment, saving rewrites only the `comments` array of the `[tests]` section
+and then offers `regen` → `srpm`; passing crates go to `srpm` — selecting one
+reopens that command with the crates already picked, the suggested flags set,
+and the values the previous run established carried over (the COPR project,
+the target chroot). The same applies to what any other command proposes in
+its own output: review-plan's `run 'review' first`
+on a NOT READY package, `resolve`'s new crates going to `init --recursive`,
+an `update -n` plan going to the apply, review-status' `next:` lines, and
+copr-status' resubmit and log commands all become jumps with the right
+crates, flags and values filled in. Keys:
 arrows/enter pick a command or a suggested next step, `tab` moves through the
 form, `ctrl+r` runs, `escape` cancels, `ctrl+q` quits.
 
