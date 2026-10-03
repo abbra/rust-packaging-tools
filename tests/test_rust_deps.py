@@ -289,6 +289,82 @@ def test_foreign_shebangs(tmp_path):
 
 # ─── updates to a new upstream release ──────────────────────────────────────
 
+def stub_buildrequires(monkeypatch, brs: dict[str, list[str]]):
+    """BuildRequires lines per crate, as build_info would return them."""
+    monkeypatch.setattr(rd, "build_info", lambda pkg: ({}, brs.get(pkg.crate, [])))
+
+
+def crate_dep(name: str, req: str, kind: str = "normal", optional: bool = False) -> dict:
+    """A dependency as the crates.io API shapes it, for resolve."""
+    return {"name": name, "crate_id": name, "req": req, "optional": optional,
+            "default_features": True, "features": [], "kind": kind, "target": None}
+
+
+def stub_cratesio(monkeypatch, versions: dict[str, list[str]], deps: dict[str, list[dict]]):
+    monkeypatch.setattr(rd, "crate_versions",
+                        lambda name: [{"num": v, "yanked": False} for v in versions.get(name, [])])
+    monkeypatch.setattr(rd, "crate_dependencies", lambda name, version: deps.get(name, []))
+
+
+def test_build_stages_orders_by_local_dependencies(tmp_path, monkeypatch):
+    for crate in ("leaf", "mid", "top"):
+        make_package(tmp_path, crate, f"rust-{crate}")
+    stub_buildrequires(monkeypatch, {
+        "mid": ["crate(leaf) >= 0.1"],
+        "top": ["crate(mid) >= 0.1", "crate(leaf) >= 0.1", "crate(serde) >= 1.0"],  # serde: Fedora has it
+    })
+    pkgs = list(rd.local_packages(tmp_path).values())
+    stages = rd.build_stages(pkgs, tmp_path)
+    assert [[p.crate for p in s] for s in stages] == [["leaf"], ["mid"], ["top"]]
+
+
+def test_build_stages_detects_a_cycle(tmp_path, monkeypatch, capsys):
+    make_package(tmp_path, "a", "rust-a")
+    make_package(tmp_path, "b", "rust-b")
+    stub_buildrequires(monkeypatch, {"a": ["crate(b) >= 0.1"], "b": ["crate(a) >= 0.1"]})
+    with pytest.raises(SystemExit):
+        rd.build_stages(list(rd.local_packages(tmp_path).values()), tmp_path)
+    assert "dependency cycle" in capsys.readouterr().err
+
+
+def test_build_stages_warns_about_dependencies_outside_the_selection(tmp_path, monkeypatch, capsys):
+    make_package(tmp_path, "a", "rust-a")
+    make_package(tmp_path, "b", "rust-b")
+    stub_buildrequires(monkeypatch, {"a": ["crate(b) >= 0.1"]})
+    stages = rd.build_stages([rd.local_packages(tmp_path)["a"]], tmp_path)
+    assert [[p.crate for p in s] for s in stages] == [["a"]]
+    assert "not in this build: b" in capsys.readouterr().err
+
+
+def test_resolve_new_with_transitive_deps(monkeypatch):
+    stub_cratesio(monkeypatch, {"top": ["2.0.0"], "mid": ["1.5.0"]},
+                  {"top": [crate_dep("mid", "^1.0")], "mid": []})
+    needed = rd.resolve([("top", "*", "(test)", ["default"])], rd.FedoraIndex({}), {})
+    assert {k: n.status for k, n in needed.items()} == {"top@2.0.0": "new", "mid@1.5.0": "new"}
+    assert needed["mid@1.5.0"].needed_by == {"top"}
+
+
+def test_resolve_update_when_fedora_has_another_version(monkeypatch):
+    stub_cratesio(monkeypatch, {"mid": ["1.5.0"]}, {"mid": []})
+    needed = rd.resolve([("mid", "^1.2", "(test)", ["default"])], rd.FedoraIndex({"mid": {"1.0.0": {""}}}), {})
+    assert needed["mid@1.5.0"].status == "update"
+    assert needed["mid@1.5.0"].fedora_versions == ["1.0.0"]
+
+
+def test_resolve_features_when_fedora_version_lacks_a_feature(monkeypatch):
+    fedora = rd.FedoraIndex({"mid": {"1.5.0": {""}}})  # ships the crate, not the feature
+    needed = rd.resolve([("mid", "^1.2", "(test)", ["derive"])], fedora, {})
+    assert needed["mid@1.5.0"].status == "features"
+    assert needed["mid@1.5.0"].missing_features == ["derive"]
+
+
+def test_resolve_counts_a_matching_local_package(tmp_path, monkeypatch):
+    stub_cratesio(monkeypatch, {"top": ["2.0.0"]}, {"top": [crate_dep("mid", "^1.0")]})
+    make_package(tmp_path, "mid", "rust-mid", "1.5.0")
+    needed = rd.resolve([("top", "*", "(test)", ["default"])], rd.FedoraIndex({}), rd.local_packages(tmp_path))
+    assert set(needed) == {"top@2.0.0"}  # mid is covered by the local package
+
+
 def releases(monkeypatch, *nums):
     monkeypatch.setattr(rd, "crate_versions", lambda name: [{"num": n, "yanked": False} for n in nums])
 
