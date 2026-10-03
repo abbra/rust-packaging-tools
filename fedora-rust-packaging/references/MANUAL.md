@@ -140,6 +140,7 @@ resolve → init ─→ package dir ─→ regen ─→ spec ─→ trial --disc
 |---|---|---|
 | `spec?` | no generated spec | `regen` |
 | `tests?` | no `[tests]` in rust2rpm.toml | `trial --discover` |
+| `tests-todo` | `[tests]` written by discovery, comments still TODOs | `tests-edit` (the TUI reason editor) or `$EDITOR` |
 | `srpm?` | no SRPM of the current version | `srpm` |
 | `adopted` | `dist-git.toml` (Fedora already has the package) | `dist-git` |
 | `targets` | `targets.toml` (built only where a target lacks the version) | `copr` |
@@ -153,8 +154,11 @@ branches split.  Two dimensions the table leaves to the commands themselves:
 within a stage, `order`, `mock-chain`, `copr`, `review` and `review-plan` work
 in dependency order (build stages), and the `tests?` stage expands into the
 discovery chain — `trial --discover`, then `--discover --apply` (write the
-table, regenerate, recheck), then `regen` with real reasons, then `srpm` —
-which the TUI renders as next steps from a trial run's output.  And where a
+table, regenerate, recheck; the written comments are TODOs, so the package
+lands in `tests-todo`), then replace them with real reasons (`tests-edit` in
+the TUI, `$EDITOR` on the command line), then `regen`, then `srpm` — all of
+which the TUI renders as next steps from a
+trial run's output.  And where a
 run proposes a step in its own wording — review-plan's `run 'review' first`,
 review-status' `next:` lines, copr-status' resubmit command — the TUI offers
 that step as a jump under the result.  `update` and `adopt` re-enter the
@@ -185,7 +189,7 @@ graph at `regen`.
 | `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…] [-r RELEASE]… [--project P] [--all-versions]` | Show the packaged version against crates.io and against Fedora and EPEL releases: one column per release, named after it. Without `-r`, the host's release (e.g. `fedora-45`). `-r` takes a release (`fedora-44`, `fedora-rawhide`, `rhel+epel-10` for COPR's EPEL, `epel-10` for EPEL itself) or a chroot, and can be repeated; `--project` adds every release the COPR project builds for. A cell shows the newest version the release has, `=` when it is the one packaged here, and `(+N)` for older ones; `--all-versions` lists them. Also shows compat packages, the targets from `targets.toml`, and whether a patch and an SRPM exist. |
-| `tui` | All of the above in a text UI (needs `python3-textual`): it opens on an Overview — every package under the root with its stage on the lifecycle graph (see "Workflows"), plus suggested next steps that jump into the commands with the right crates picked; a sidebar lists all commands in workflow order; forms are built from the same argparse metadata as `--help`, rendered as what the parser says they are (crate checkboxes, one mode choice per mutually exclusive group, add/remove rows per repeatable option, Run gated on required arguments); the exact `rust-deps …` command line is shown while filling it; output streams live, diagnostics are colored; `status`, `doctor`, `trial`, `srpm` and any `--json` result are rendered as tables, and next steps proposed in a run's output — a `trial` run's verdicts, review-plan's NOT READY reasons, review-status' `next:` lines, copr-status' resubmit command — become jumps. Keys: arrows/enter pick, `tab` through the form, `ctrl+r` run, `escape` cancel, `ctrl+q` quit. See "Text UI". |
+| `tui` | All of the above in a text UI (needs `python3-textual`): it opens on an Overview — every package under the root with its stage on the lifecycle graph (see "Workflows"), plus suggested next steps that jump into the commands with the right crates picked; a sidebar lists all commands in workflow order, gated on what a `doctor` probe finds; forms are built from the same argparse metadata as `--help`, rendered as what the parser says they are (crate checkboxes, one mode choice per mutually exclusive group, add/remove rows per repeatable option, Run gated on required arguments); the exact `rust-deps …` command line is shown while filling it; output streams live, diagnostics are colored; each command's result shape comes from a playbook table, so results render as tables (verdicts, the review-plan board, stage ladders, any `--json` result), and next steps proposed in a run's output — a `trial` run's verdicts, the `tests-edit` reason editor after a passing recheck, review-plan's NOT READY reasons, review-status' `next:` lines, copr-status' resubmit command — become jumps with the crates, flags and values filled in. Keys: arrows/enter pick, `tab` through the form, `ctrl+r` run, `escape` cancel, `ctrl+q` quit. See "Text UI". |
 
 Bugs, comments and builds in the output are links. On a terminal they are
 OSC 8 hyperlinks on short labels (the bug number, `#3`, the build ID);
@@ -253,9 +257,9 @@ metadata decides the widget:
   - plain trial with failures → `trial --discover` for those crates;
   - a discovery that suggested a `[tests]` table → `trial --discover --apply`,
     which writes the table, regenerates the spec and re-runs the tests;
-  - an applied table whose recheck passes → `regen`, after replacing the
-    table's TODO comments with real reasons; whose recheck fails → `--discover`
-    again;
+  - an applied table whose recheck passes → `tests-edit`, the reason editor
+    below (its saved reasons are what `regen` then puts in the spec); whose
+    recheck fails → `--discover` again;
   - crates whose test targets all pass → `srpm`.
   Selecting one reopens that command with the crates already picked and the
   suggested flags set. The Overview's own suggestions carry the same flags.
@@ -268,15 +272,45 @@ metadata decides the widget:
   wording kept as the reason.  So when `review-plan` reports a package
   NOT READY because fedora-review has not run, the jump to `review` for that
   package is right there.
+- **The reason editor** (`tests-edit`): the edge out of the `tests-todo`
+  stage.  It shows each package's `[tests]` table as read-only context with
+  one editable row per TODO comment, labeled with the test target that comment
+  explains.  Saving rewrites only the `comments` array inside the `[tests]`
+  section of `rust2rpm.toml` — the rest of the hand-edited file is untouched
+  — and the editor then offers the `regen` → `srpm` jump for those crates.
+  With the TODOs gone the Overview stops suggesting `tests-edit` and the
+  packages move on to the next stage.
+- **Each command's result has a declared shape** (a playbook): the same table
+  that picks the result renderer names the tools a command needs and the
+  values its jumps should carry.  `review-plan` renders as a staged board
+  (stage, package, READY / NOT READY / FILED / update, and what it waits
+  for); `review-request` shows the drafts it wrote and offers `--file` only
+  for the packages not filed yet; `resolve`'s NEW lines jump to
+  `init --recursive` with exactly those crates; an `update -n` plan jumps to
+  the same `update` ready to apply; `order`, `mock-chain` and `copr` progress
+  render as stage ladders; `copr-status` renders its per-chroot verdict
+  ladder, and the `copr-log … -r … --project …` commands it proposes become
+  fully prefilled jumps.
+- **Carry-over**: a jump keeps the values the previous run established — the
+  COPR `--project`, the target `-r` chroot — so a `copr-status` → `copr-log`
+  → `mock-chain` chain does not ask for them again.  Values named by an
+  explicit suggestion always win over carried ones.
+- **The sidebar is gated on what `doctor` finds**: on start the app runs one
+  `doctor` probe; a command whose playbook tools are missing stays visible but
+  unselectable, labeled `needs mock` and the like.  Running `doctor` again
+  re-gates it.  Only a tool's own presence line counts — the `mock` group
+  warning is a setup hint, not a missing tool.
 - `ctrl+r` (or the Run button) starts the command; output streams live into the
   Log view, with `ERROR:`, `ACTION NEEDED:`, `WARNING:`, `==` blocks, stage
   headers and verdict words (`ok`, `MISSING`, `NEW`, `[!]`, …) colored.
   `escape` cancels a running command; switching commands cancels too.
-- The Table view renders `status`, `doctor`, `trial` and `srpm` output as
-  tables — verdict lines become rows (`srpm`: crate, version, SRPM, `%prep`,
-  rpmlint; a stage line that is missing in the log marks where that run
-  stopped) — and any `--json` result as a table (arrays of objects by their
-  keys, build stages as rows).  It opens when the output has such a structure
+- The Table view renders each command's output per its playbook — `status`,
+  `doctor`, `trial`, `srpm`, `review-plan`, `review-request`, `resolve`,
+  `update`, `order`, `copr-status` — verdict lines become rows (`srpm`: crate,
+  version, SRPM, `%prep`, rpmlint; a stage line that is missing in the log
+  marks where that run stopped) — and any `--json` result as a table (arrays
+  of objects by their keys, build stages as rows).  It opens when the output
+  has such a structure
   or when the run only proposed next steps (then the pane shows just the
   suggestions); starting a run or switching commands returns to the Log view,
   so the Table pane is never left showing nothing.
