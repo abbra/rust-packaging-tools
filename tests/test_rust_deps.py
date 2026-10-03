@@ -8,8 +8,8 @@ import importlib.util
 import json
 import subprocess
 import sys
-import urllib.error
 import tomllib
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -482,7 +482,7 @@ def test_conflict_parsing():
 def local_pkg(tmp_path: Path, drop_features: list[str]) -> "rd.LocalPackage":
     d = tmp_path / "jsonschema"
     d.mkdir(exist_ok=True)
-    (d / rd.EDITS_FILE).write_text(f"drop-features = {drop_features!r}\n".replace("'", '"'))
+    (d / rd.EDITS_FILE).write_text(f"drop-features = {json.dumps(drop_features)}\n")
     return rd.LocalPackage("jsonschema", d, "0.58.0")
 
 
@@ -580,7 +580,7 @@ def test_tmt_image(chroot, image):
 # ─── review plan ────────────────────────────────────────────────────────────
 
 def test_review_plan(tmp_path, monkeypatch):
-    import os, json as _json
+    import os
     pkgs = {}
     for crate, spec_name in [("zmij", "rust-zmij"), ("synta-derive", "rust-synta-derive"),
                              ("synta", "rust-synta"), ("synta-cbor", "rust-synta-cbor"),
@@ -588,10 +588,11 @@ def test_review_plan(tmp_path, monkeypatch):
         make_package(tmp_path, crate, spec_name, "1.0.0")
     (tmp_path / "ciborium" / rd.TARGETS_FILE).write_text('only = ["rhel+epel-10"]\n')
     (tmp_path / "zmij" / rd.DIST_GIT_FILE).write_text('package = "rust-zmij"\nbranch = "rawhide"\ncommit = "2cccfd47b7"\n')
-    (tmp_path / "synta-cbor" / rd.REQUEST_STATE).write_text(_json.dumps({"bug": 2600001}))
+    (tmp_path / "synta-cbor" / rd.REQUEST_STATE).write_text(json.dumps({"bug": 2600001}))
     draft = tmp_path / "synta-derive" / rd.REQUEST_DRAFT
     draft.write_text("Summary: Review Request: rust-synta-derive - derive macros\n")
-    os.utime(draft, (2_000_000_000, 2_000_000_000))  # newer than the spec
+    os.utime(tmp_path / "synta-derive" / "rust-synta-derive.spec", (1_000_000_000, 1_000_000_000))
+    os.utime(draft, (2_000_000_000, 2_000_000_000))  # newer than the spec; both mtimes fixed
     local = rd.local_packages(tmp_path)
     stages = [[local["zmij"], local["synta-derive"], local["ciborium"]], [local["synta"]], [local["synta-cbor"]]]
     monkeypatch.setattr(rd, "build_stages", lambda pkgs, root, warn_outside=True: stages)
@@ -683,6 +684,8 @@ def test_prepare_update_refuses_when_dist_git_moved(tmp_path, monkeypatch):
     import subprocess
     def sh(*args, cwd):
         subprocess.run(args, cwd=cwd, check=True, capture_output=True)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
     upstream = tmp_path / "upstream"
     upstream.mkdir()
     sh("git", "init", "-q", "-b", "rawhide", cwd=upstream)
@@ -707,6 +710,8 @@ def test_prepare_update_uses_the_adopted_branch(tmp_path, monkeypatch):
     import subprocess
     def sh(*args, cwd):
         return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
     upstream = tmp_path / "upstream"
     upstream.mkdir()
     sh("git", "init", "-q", "-b", "rawhide", cwd=upstream)
