@@ -1228,6 +1228,18 @@ def regen(pkg: LocalPackage, version: str | None, local_crate: Path | None = Non
 LICENSE_FIXME_RE = re.compile(r"^# FIXME: paste output of %%cargo_license_summary here\nLicense:( +)# FIXME$", re.M)
 
 
+def cargo_feature_flags(flags: list[str]) -> list[str]:
+    """Translate rust2rpm's %cargo_build / %cargo_generate_buildrequires feature flags
+    (-a, -n, -f FEAT, -fFEAT) into cargo / cargo2rpm arguments."""
+    args, it = [], iter(flags)
+    for f in it:
+        if f in ("-a", "-n"):
+            args.append({"-a": "--all-features", "-n": "--no-default-features"}[f])
+        elif f.startswith("-f"):
+            args += ["--features", f[2:] or next(it, "")]
+    return args
+
+
 def binary_license(pkg: LocalPackage) -> str | None:
     """The License of the package's executables: what %cargo_license_summary reports.
 
@@ -1237,13 +1249,7 @@ def binary_license(pkg: LocalPackage) -> str | None:
     """
     spec = pkg.spec.read_text()
     m = re.search(r"^%cargo_build(.*)$", spec, re.M)
-    flags = (m.group(1) if m else "").split()
-    args, it = [], iter(flags)
-    for f in it:
-        if f in ("-a", "-n"):
-            args.append({"-a": "--all-features", "-n": "--no-default-features"}[f])
-        elif f.startswith("-f"):
-            args += ["--features", f[2:] or next(it, "")]
+    args = cargo_feature_flags((m.group(1) if m else "").split())
     # cargo tree as %cargo_license_summary (cargo2rpm) runs it, but online: offline, a fresh
     # resolution without dev-dependencies can miss crates that 'cargo fetch' did not index
     env = {**os.environ, "RUSTC_BOOTSTRAP": "1"}
@@ -2225,14 +2231,7 @@ def build_info(pkg: LocalPackage) -> tuple[dict, list[str]]:
         m = re.search(r"^%cargo_generate_buildrequires(.*)$", spec, re.M)
         flags = (m.group(1) if m else "").split()
         with_check = "-t" in flags or spec_runs_check(pkg.spec)
-        args, it = [], iter(flags)
-        for f in it:
-            if f == "-a":
-                args.append("--all-features")
-            elif f == "-n":
-                args.append("--no-default-features")
-            elif f.startswith("-f"):
-                args += ["--features", f[2:] or next(it, "")]
+        args = cargo_feature_flags(flags)
         with tempfile.TemporaryDirectory() as tmp:
             src = extract_patched(pkg, Path(tmp))
             toml = tomllib.loads((src / "Cargo.toml").read_text())
