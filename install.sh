@@ -70,7 +70,7 @@ is_ours() {  # is $1 an installed copy/link of this skill?
 
 # ── uninstall ────────────────────────────────────────────────────────────────
 if [[ $uninstall == 1 ]]; then
-    for t in "${targets[@]}"; do
+    for t in ${targets[@]+"${targets[@]}"}; do
         dest="$t/$NAME"
         if [[ -e "$dest" || -L "$dest" ]]; then
             is_ours "$dest" || die "$dest is not this skill; not removing it"
