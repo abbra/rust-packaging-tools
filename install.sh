@@ -14,11 +14,17 @@
 #
 # Options:
 #   --link             symlink instead of copying (edits here take effect at once)
-#   --bin DIR          also put the 'rust-deps' command into DIR (e.g. ~/.local/bin)
+#   --bin DIR          put the 'rust-deps' command into DIR (e.g. ~/.local/bin);
+#                      with no other target nothing is installed and the command
+#                      links into this checkout, so keep it
 #   --zip FILE         build FILE.zip for tools that install skills from an
-#                      uploaded archive (e.g. claude.ai) — no install target needed
+#                      uploaded archive (e.g. claude.ai) — no install target
+#                      needed; overwrites an existing archive
 #   --uninstall        remove the skill (and --bin link) from the given targets
 #   -h, --help         show this help
+#
+# Requires bash >= 4.4 and GNU coreutils (realpath); run it on Fedora or
+# another GNU/Linux system.
 
 set -euo pipefail
 
