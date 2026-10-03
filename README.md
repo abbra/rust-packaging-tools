@@ -18,7 +18,7 @@ rust-packaging-tools/
 ├── install.sh                     installs the skill and/or the command
 └── fedora-rust-packaging/         the skill (self-contained, location independent)
     ├── SKILL.md                   instructions for agents
-    ├── scripts/rust-deps          the tool (Python 3, no extra modules beyond rust2rpm and python3-bugzilla)
+    ├── scripts/rust-deps          the tool (Python 3.12+, no extra modules beyond rust2rpm and python3-bugzilla)
     └── references/MANUAL.md       the manual: workflow, file formats, fixes
 ```
 
@@ -34,7 +34,8 @@ root is `--root DIR`, else `$RUST_DEPS_ROOT`, else the current directory.
 ./install.sh --agents                 # OMP (oh-my-pi) and others: ~/.agents/skills
 ./install.sh --dest DIR               # any other agent's skills directory
 ./install.sh --zip fedora-rust-packaging.zip   # archive for uploading as a skill
-./install.sh --bin ~/.local/bin       # also put 'rust-deps' on your PATH
+./install.sh --bin ~/.local/bin       # put 'rust-deps' on your PATH (with no other target:
+                                      # nothing is installed and it links into this checkout)
 ./install.sh --link …                 # symlink instead of copy (for development)
 ./install.sh --uninstall [targets…]   # remove again
 ```
@@ -108,7 +109,8 @@ The full workflow and reference is in
 ## Tests
 
 ```
-python3 -m pytest tests          # unit tests: offline, need python3-pytest and rust2rpm
+python3 -m pytest tests          # unit tests: offline, need python3-pytest, python3-pyyaml
+                                 # and rust2rpm (for its cargo2rpm module)
 tests/smoke.sh [crate@version]   # end to end on a crate from crates.io (default num-cmp@0.1.0):
                                  # doctor, resolve, init, regen, trial, srpm, order,
                                  # check-targets, copr -n, status; needs network
