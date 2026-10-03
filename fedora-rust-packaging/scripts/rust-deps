@@ -1946,7 +1946,8 @@ def cmd_srpm(args) -> None:
             failed.append(pkg.crate)
             print(res.stdout + res.stderr, file=sys.stderr)
             continue
-        info("   " + res.stdout.strip().splitlines()[-1])
+        wrote = res.stdout.strip().splitlines()
+        info("   " + (wrote[-1] if wrote else f"Wrote: {pkg.rpm_name}-{pkg.version} src.rpm"))
         if not args.no_prep:
             with tempfile.TemporaryDirectory() as top:
                 res = run(["rpmbuild", "-bp", "--nodeps", "--define", f"_topdir {top}",
