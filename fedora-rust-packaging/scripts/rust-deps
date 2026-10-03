@@ -4881,6 +4881,30 @@ def render_resolve_output(lines: list[str], root: Path):
     return parsed, actions
 
 
+_ORDER_STAGE_RE = re.compile(r"^stage (\d+): (.*)$")
+
+
+def render_order_output(lines: list[str], root: Path):
+    """'order' prints one 'stage N: crates' line per build stage: show the ladder."""
+    rows = [[m.group(1), m.group(2)] for line in lines if (m := _ORDER_STAGE_RE.match(line))]
+    if not rows:
+        return None, []
+    parsed = (["stage", "packages"], rows)
+    return parsed, []
+
+
+def parse_tool_states(lines: list[str]) -> dict[str, bool]:
+    """doctor's tool lines as {tool: available}; anything else is ignored."""
+    out: dict[str, bool] = {}
+    parsed = parse_state_table(lines)
+    if not parsed:
+        return out
+    for state, name, _ in parsed[1]:
+        if name in REQUIRED_TOOLS or name in OPTIONAL_TOOLS:
+            out[name] = state == "ok"
+    return out
+
+
 _UPDATE_PLAN_RE = re.compile(r"^Updates, in build order: (.*)$")
 _UPDATE_PAIR_RE = re.compile(r"^(\S+) (\S+) -> (\S+)$")
 _UPDATE_DONE_RE = re.compile(r"^== (\S+) (\S+) -> (\S+)$")
@@ -4929,6 +4953,7 @@ TUI_RESULT_RENDERERS = {
     "review-request": render_review_request_output,
     "resolve": render_resolve_output,
     "update": render_update_output,
+    "order": render_order_output,
 }
 
 
@@ -4948,7 +4973,7 @@ TUI_PLAYBOOKS = {
     "doctor": TuiPlaybook(result="doctor"),
     "status": TuiPlaybook(result="status", carry=("target",)),
     "resolve": TuiPlaybook(result="resolve"),
-    "order": TuiPlaybook(),
+    "order": TuiPlaybook(result="order"),
     "check-targets": TuiPlaybook(carry=("chroot", "project")),
     "init": TuiPlaybook(carry=("target",)),
     "regen": TuiPlaybook(),
@@ -5129,19 +5154,48 @@ def make_tui_app() -> type:
 
         def on_mount(self) -> None:
             self.sub_title = f"{self.root}  ({len(local_packages(self.root))} packages)"
+            self._build_sidebar()
+            self.query_one("#run", Button).disabled = True  # until a command is picked
+            self._refresh_overview()
+            # gate the sidebar as soon as a 'doctor' probe has answered
+            self._probe_tools()
+
+        def _build_sidebar(self) -> None:
             options = self.query_one("#commands", OptionList)
+            options.clear_options()
             listed = set()
             options.add_option(Option("Overview", id="overview"))
             for title, names in TUI_SECTIONS:
                 options.add_option(Option(f"[b]{title}[/b]", disabled=True))
                 for name in names:
                     if name in commands:
-                        options.add_option(Option(name, id=name))
+                        options.add_option(self._command_option(name))
                         listed.add(name)
             for name in sorted(set(commands) - listed):  # commands added later still show up
-                options.add_option(Option(name, id=name))
-            self.query_one("#run", Button).disabled = True  # until a command is picked
-            self._refresh_overview()
+                options.add_option(self._command_option(name))
+
+        def _command_option(self, name: str) -> Option:
+            # a command whose playbook tools are missing stays visible but unselectable
+            missing = [t for t in TUI_PLAYBOOKS.get(name, TuiPlaybook()).requires
+                       if self._tools_ok.get(t) is False]
+            if missing:
+                return Option(f"{name}  (needs {', '.join(missing)})", id=name, disabled=True)
+            return Option(name, id=name)
+
+        @work(thread=True, exclusive=True, group="probe")
+        def _probe_tools(self) -> None:
+            argv = [sys.executable, str(Path(__file__).resolve()), "--root", str(self.root), "doctor"]
+            try:
+                res = subprocess.run(argv, capture_output=True, text=True, errors="replace")
+                tools = parse_tool_states(res.stdout.splitlines())
+            except Exception:
+                tools = {}
+            if tools:
+                self.call_from_thread(self._apply_tool_gates, tools)
+
+        def _apply_tool_gates(self, tools: dict[str, bool]) -> None:
+            self._tools_ok = tools
+            self._build_sidebar()
 
         def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
             if event.option_list.id in ("suggestions", "result-actions", "tests-actions"):
@@ -5563,6 +5617,8 @@ def make_tui_app() -> type:
             self.query_one("#cancel", Button).disabled = True
             self._write_line(f"exit {code}", "bold red" if code else "dim")
             self._render_structured()
+            if self._cmd == "doctor":  # this run just probed the environment: gate on it
+                self._apply_tool_gates(parse_tool_states(self._stdout))
             self._update_preview()
             self._refresh_overview()  # the tree just changed; keep the cockpit current
 
