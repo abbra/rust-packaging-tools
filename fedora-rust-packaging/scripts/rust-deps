@@ -4894,14 +4894,17 @@ def render_order_output(lines: list[str], root: Path):
 
 
 def parse_tool_states(lines: list[str]) -> dict[str, bool]:
-    """doctor's tool lines as {tool: available}; anything else is ignored."""
+    """doctor's tool lines as {tool: available}; anything else is ignored.
+
+    Only the tool's own presence line counts: the 'mock group' warning is a
+    setup hint, not a missing tool (doctor does not fail on it either)."""
     out: dict[str, bool] = {}
     parsed = parse_state_table(lines)
     if not parsed:
         return out
     for state, name, _ in parsed[1]:
         if name in REQUIRED_TOOLS or name in OPTIONAL_TOOLS:
-            out[name] = state == "ok"
+            out.setdefault(name, state == "ok")
     return out
 
 
