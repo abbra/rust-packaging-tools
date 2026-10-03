@@ -939,6 +939,30 @@ def test_tui_trial_actions_chain_discovery_to_apply_and_regen():
     assert "still fails" in actions[0][3]
 
 
+def test_parse_srpm_output_reads_srpm_blocks():
+    rows = rd.parse_srpm_output([
+        "== a 0.1.0",
+        "   Wrote: /root/a/a-0.1.0-1.fc45.src.rpm",
+        "   %prep ok",
+        '   1 packages and 0 specfiles checked; 0 errors, 0 warnings, 0 filtered, 0 aborted, rating: "OK"',
+        "== b 0.2.0",  # %prep failed: the error text went to the log, the block just ends
+        "   Wrote: /root/b/b-0.2.0-1.fc45.src.rpm",
+        "== c 0.3.0",  # failed before writing an SRPM
+        "== d 1.0",  # --no-prep: the rpmlint line proves the run continued past %prep
+        "   Wrote: /root/d/d-1.0-1.fc45.src.rpm",
+        '   1 packages and 0 specfiles checked; 2 errors, 0 warnings, 0 filtered, 0 aborted, rating: "FATALLY FAILED"',
+    ])
+    assert [(r["crate"], r["srpm"], r["prep"], r["rpmlint"]) for r in rows] == [
+        ("a", "a-0.1.0-1.fc45.src.rpm", "ok",
+         '0 errors, 0 warnings, 0 filtered, 0 aborted, rating: "OK"'),
+        ("b", "b-0.2.0-1.fc45.src.rpm", "FAILED", "FAILED"),
+        ("c", "FAILED", "FAILED", "FAILED"),
+        ("d", "d-1.0-1.fc45.src.rpm", "skipped",
+         '2 errors, 0 warnings, 0 filtered, 0 aborted, rating: "FATALLY FAILED"'),
+    ]
+    assert rd.parse_srpm_output(["no blocks here"]) == []
+
+
 def test_tui_package_rows_reports_tree_state(tmp_path):
     make_package(tmp_path, "a", "rust-a", "0.1.0")
     make_package(tmp_path, "b", "rust-b", "0.2.0")
@@ -1245,5 +1269,61 @@ def test_tui_app_trial_results_drive_next_steps(tmp_path):
             assert app.query_one(f"#{app._wid('f-apply')}").value is True
             argv = app._argv()
             assert "--discover" in argv and "--apply" in argv
+
+    asyncio.run(drive())
+
+
+def test_tui_app_srpm_results_render_as_a_table(tmp_path):
+    pytest.importorskip("textual")
+    from textual.widgets import DataTable
+    app_class = rd.make_tui_app()
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    srpm_lines = [
+        "== a 0.1.0",
+        "   Wrote: /root/a/a-0.1.0-1.fc45.src.rpm",
+        "   %prep ok",
+        '   1 packages and 0 specfiles checked; 0 errors, 0 warnings, 0 filtered, 0 aborted, rating: "OK"',
+    ]
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(140, 45)) as pilot:
+            await pilot.pause()
+            app._show("srpm")
+            await app._rebuild.wait()
+            app._stdout = srpm_lines
+            app._render_structured()
+            await pilot.pause()
+            # the per-crate stage lines become a table and the Table tab opens
+            assert app.query_one("#result-table", DataTable).row_count == 1
+            assert app.query_one("#tabs").active == "table"
+            # output with no table shape goes back to the Log view, never an empty table
+            app._stdout = ["nothing structured"]
+            app._render_structured()
+            await pilot.pause()
+            assert app.query_one("#tabs").active == "log"
+            # starting a run shows the streaming Log even if a table was open before
+            app._stdout = srpm_lines
+            app._render_structured()
+            await pilot.pause()
+            assert app.query_one("#tabs").active == "table"
+            app.action_run_command()  # 'srpm' with no crates picked: it dies on stderr
+            assert app.query_one("#tabs").active == "log"
+            run_btn = app.query_one("#run")
+            for _ in range(600):
+                await pilot.pause(0.05)
+                if not run_btn.disabled:
+                    break
+            assert not run_btn.disabled, "the command did not finish"
+            assert app.query_one("#tabs").active == "log"
+            assert app.query_one("#result-table", DataTable).row_count == 0
+            # switching commands leaves the previous command's table: start from the log
+            app._stdout = srpm_lines
+            app._render_structured()
+            await pilot.pause()
+            assert app.query_one("#tabs").active == "table"
+            app._show("status")
+            await app._rebuild.wait()
+            assert app.query_one("#tabs").active == "log"
 
     asyncio.run(drive())
