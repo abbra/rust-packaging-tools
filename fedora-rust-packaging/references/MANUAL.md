@@ -182,7 +182,7 @@ which the TUI renders as next steps from a trial run's output.  `update` and
 | `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…] [-r RELEASE]… [--project P] [--all-versions]` | Show the packaged version against crates.io and against Fedora and EPEL releases: one column per release, named after it. Without `-r`, the host's release (e.g. `fedora-45`). `-r` takes a release (`fedora-44`, `fedora-rawhide`, `rhel+epel-10` for COPR's EPEL, `epel-10` for EPEL itself) or a chroot, and can be repeated; `--project` adds every release the COPR project builds for. A cell shows the newest version the release has, `=` when it is the one packaged here, and `(+N)` for older ones; `--all-versions` lists them. Also shows compat packages, the targets from `targets.toml`, and whether a patch and an SRPM exist. |
-| `tui` | All of the above in a text UI (needs `python3-textual`): it opens on an Overview — every package under the root with its stage on the lifecycle graph (see "Workflows"), plus suggested next steps that jump into the commands with the right crates picked; a sidebar lists all commands in workflow order; forms are built from the same argparse metadata as `--help`, rendered as what the parser says they are (crate checkboxes, one mode choice per mutually exclusive group, add/remove rows per repeatable option, Run gated on required arguments); the exact `rust-deps …` command line is shown while filling it; output streams live, diagnostics are colored; `status`, `doctor`, `trial` and any `--json` result are rendered as tables, and a `trial` run's verdicts become next steps (test discovery for failures, `srpm` for passes) you can jump into. Keys: arrows/enter pick, `tab` through the form, `ctrl+r` run, `escape` cancel, `ctrl+q` quit. See "Text UI". |
+| `tui` | All of the above in a text UI (needs `python3-textual`): it opens on an Overview — every package under the root with its stage on the lifecycle graph (see "Workflows"), plus suggested next steps that jump into the commands with the right crates picked; a sidebar lists all commands in workflow order; forms are built from the same argparse metadata as `--help`, rendered as what the parser says they are (crate checkboxes, one mode choice per mutually exclusive group, add/remove rows per repeatable option, Run gated on required arguments); the exact `rust-deps …` command line is shown while filling it; output streams live, diagnostics are colored; `status`, `doctor`, `trial`, `srpm` and any `--json` result are rendered as tables, and a `trial` run's verdicts become next steps (test discovery for failures, `srpm` for passes) you can jump into. Keys: arrows/enter pick, `tab` through the form, `ctrl+r` run, `escape` cancel, `ctrl+q` quit. See "Text UI". |
 
 Bugs, comments and builds in the output are links. On a terminal they are
 OSC 8 hyperlinks on short labels (the bug number, `#3`, the build ID);
@@ -260,9 +260,13 @@ metadata decides the widget:
   Log view, with `ERROR:`, `ACTION NEEDED:`, `WARNING:`, `==` blocks, stage
   headers and verdict words (`ok`, `MISSING`, `NEW`, `[!]`, …) colored.
   `escape` cancels a running command; switching commands cancels too.
-- The Table view renders `status` and `doctor` output as tables, and any
-  `--json` result as a table (arrays of objects by their keys, build stages as
-  rows).  It opens automatically when the output has such a structure.
+- The Table view renders `status`, `doctor`, `trial` and `srpm` output as
+  tables — verdict lines become rows (`srpm`: crate, version, SRPM, `%prep`,
+  rpmlint; a stage line that is missing in the log marks where that run
+  stopped) — and any `--json` result as a table (arrays of objects by their
+  keys, build stages as rows).  It opens only when the output has such a
+  structure; starting a run or switching commands returns to the Log view, so
+  the Table pane is never left showing nothing.
 
 `RUST_DEPS_NO_HYPERLINKS` is set for the subprocesses it runs: the full URLs
 appear in the Log view.
