@@ -22,7 +22,7 @@ can still regenerate each spec.
 
 ```
 sudo dnf install python3 rust2rpm cargo rpm-build rpmdevtools rpmlint dnf5 patch util-linux iproute
-# optional: mock, fedora-review (plus 'sudo usermod -aG mock $USER'), copr-cli
+# optional: mock, fedora-review (plus 'sudo usermod -aG mock $USER'), copr-cli, python3-textual (for 'tui')
 ```
 
 `rust2rpm` provides the `python3-cargo2rpm` module that `rust-deps` uses for
@@ -148,6 +148,7 @@ hold:
 | `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…] [-r RELEASE]… [--project P] [--all-versions]` | Show the packaged version against crates.io and against Fedora and EPEL releases: one column per release, named after it. Without `-r`, the host's release (e.g. `fedora-45`). `-r` takes a release (`fedora-44`, `fedora-rawhide`, `rhel+epel-10` for COPR's EPEL, `epel-10` for EPEL itself) or a chroot, and can be repeated; `--project` adds every release the COPR project builds for. A cell shows the newest version the release has, `=` when it is the one packaged here, and `(+N)` for older ones; `--all-versions` lists them. Also shows compat packages, the targets from `targets.toml`, and whether a patch and an SRPM exist. |
+| `tui` | All of the above in a text UI (needs `python3-textual`): it opens on an Overview — every package under the root with its spec/patch/SRPM/tests/review state, plus suggested next steps that jump into the commands with the right crates picked; a sidebar lists all commands in workflow order; forms are built from the same argparse metadata as `--help`, rendered as what the parser says they are (crate checkboxes, one mode choice per mutually exclusive group, add/remove rows per repeatable option, Run gated on required arguments); the exact `rust-deps …` command line is shown while filling it; output streams live, diagnostics are colored; `status`, `doctor`, `trial` and any `--json` result are rendered as tables, and a `trial` run's verdicts become next steps (test discovery for failures, `srpm` for passes) you can jump into. Keys: arrows/enter pick, `tab` through the form, `ctrl+r` run, `escape` cancel, `ctrl+q` quit. See "Text UI". |
 
 Bugs, comments and builds in the output are links. On a terminal they are
 OSC 8 hyperlinks on short labels (the bug number, `#3`, the build ID);
@@ -167,6 +168,70 @@ Caches live in `~/.cache/rust-packaging-tools`:
 To query another release than the running system, pass `-r CHROOT` (see
 "COPR build failures" for how targets map to repositories), or set
 `RUST_DEPS_DNF_ARGS="--releasever=rawhide"`.
+
+## Text UI (`tui`)
+
+`rust-deps tui` (needs `python3-textual`) presents every command in one
+terminal window, for people who prefer filling a form to remembering flags.  It
+is a front end, not a second implementation: the form of each command is
+derived from the same `argparse` definitions as `--help` — from the actions,
+their `nargs`, `choices`, defaults, `required` flags and mutually exclusive
+groups — and running a command runs `rust-deps` itself as a subprocess.  The
+metadata decides the widget:
+
+- **Overview** (the home screen): a table of the packages under the root —
+  version, spec, patch, SRPM, `[tests]` table, review draft, scope — and the
+  next steps the tree state implies, in Quick-start order (a package without
+  a `[tests]` table suggests `trial --discover`; without an SRPM, `srpm`;
+  once built, `review-plan` and `status`).  Selecting a suggestion opens that
+  command with its crates already checked.  The Overview refreshes after every
+  run.
+- The sidebar lists all commands, grouped as in the Quick start: Setup, Missing
+  crates, Create, Test, Build, COPR builds, Review, In Fedora.
+- **The form is two panes side by side**: the crate picker on the left, the
+  options on the right, each option a line of its own — so a long crate list
+  never pushes the options out of view.  A command without a picker (e.g.
+  `copr-log`) uses the full width; one without options shows only the picker.
+- **Crate selection** (the positional `crates` plus `--all`): a checkbox per
+  package actually found under the root (with its version), a field for crates
+  not in the tree yet (`init`, `resolve`), and the `--all` switch.
+- **Mutually exclusive groups** become one choice: `regen` asks for a mode
+  (`--latest` / `--version V` / `--crate-file PATH`; `--compat` /
+  `--no-compat` / leave as is) and shows the value field only for the chosen
+  mode.
+- **Repeatable options** (`-r`, `--manifest`, `--local-root`, `--koji-task`)
+  get rows you add with `+` or remove with `–`.
+- Flags show as checkbox rows with a short form of their `--help` text inline
+  (the full text is the hover tooltip), like the crate rows; other options get
+  a labeled field with their `--help` text; defaults are prefilled, numbers get
+  numeric fields, and **Run stays disabled** while a required argument
+  (`--project`, `copr-log`'s crate and chroot, …) is missing — the preview
+  line names what is still needed.
+- Below the form, the exact `rust-deps …` command line that will run — a quick
+  way to learn the CLI.
+- **Results feed back into the UI**: a `trial` run renders its per-crate
+  verdict lines as a table (crate, version, target, status, summary, first
+  error) with the run's mode recognized (plain, `--discover`, the recheck
+  `--apply` chains), and under it *next steps from this run*:
+  - plain trial with failures → `trial --discover` for those crates;
+  - a discovery that suggested a `[tests]` table → `trial --discover --apply`,
+    which writes the table, regenerates the spec and re-runs the tests;
+  - an applied table whose recheck passes → `regen`, after replacing the
+    table's TODO comments with real reasons; whose recheck fails → `--discover`
+    again;
+  - crates whose test targets all pass → `srpm`.
+  Selecting one reopens that command with the crates already picked and the
+  suggested flags set. The Overview's own suggestions carry the same flags.
+- `ctrl+r` (or the Run button) starts the command; output streams live into the
+  Log view, with `ERROR:`, `ACTION NEEDED:`, `WARNING:`, `==` blocks, stage
+  headers and verdict words (`ok`, `MISSING`, `NEW`, `[!]`, …) colored.
+  `escape` cancels a running command; switching commands cancels too.
+- The Table view renders `status` and `doctor` output as tables, and any
+  `--json` result as a table (arrays of objects by their keys, build stages as
+  rows).  It opens automatically when the output has such a structure.
+
+`RUST_DEPS_NO_HYPERLINKS` is set for the subprocesses it runs: the full URLs
+appear in the Log view.
 
 ## `cargo-toml-edits.toml`
 
