@@ -14,8 +14,17 @@ fi
 crate=${spec%@*}
 version=${spec#*@}
 here=$(cd "$(dirname "$0")/.." && pwd)
-root=$(mktemp -d)
-trap 'rm -rf "$root"' EXIT
+root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/rust-deps-smoke.XXXXXX")
+failed=1
+cleanup() {
+    if ((failed)); then
+        echo "smoke test failed; the generated tree is kept in $root" >&2
+    else
+        rm -rf "$root"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 export XDG_CACHE_HOME="$root/.cache"   # a clean cache: no crates.io or dnf results from earlier runs
 T=("$here/fedora-rust-packaging/scripts/rust-deps" --root "$root")
 
@@ -60,4 +69,5 @@ grep -qF "rust-$crate-$version-" "$root/copr.out"
 step status
 "${T[@]}" status
 
+failed=0
 printf '\nsmoke test passed\n'
