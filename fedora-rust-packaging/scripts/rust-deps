@@ -525,8 +525,13 @@ def _edit_features(block: str, drop_feat: set, drop_dep: set, add_default: list)
     for f in add_default:
         if re.search(r"(?m)^default = \[\]", block):
             block = re.sub(r"(?m)^default = \[\]", f'default = ["{f}"]', block, count=1)
-        else:
+        elif re.search(r"(?m)^default = \[", block):
             block = re.sub(r"(?m)^default = \[", f'default = [\n    "{f}",', block, count=1)
+        else:
+            # no explicit default: cargo's implicit default enables no optional crate,
+            # so declare a default list to enable the feature
+            block = re.sub(r"(?m)^\[features\].*\n", lambda m: m.group(0) + f'default = ["{f}"]\n',
+                          block, count=1)
     return block
 
 
