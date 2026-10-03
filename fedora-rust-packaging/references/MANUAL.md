@@ -30,7 +30,10 @@ semver matching. `rust-deps doctor` checks all of this, including membership
 in the `mock` group and the user namespaces (with a working loopback
 interface) that offline trials need.
 
-`rust-deps` is `scripts/rust-deps` in the skill directory. `install.sh
+`rust-deps` is `scripts/rust-deps` in the skill directory: a launcher for the
+`scripts/rust_deps/` package next to it, one module per command domain
+(`resolver.py` for resolve, `trial.py` for trial, `tui_*.py` for the UI, …);
+running the launcher needs nothing installed. `install.sh
 --bin ~/.local/bin` (from the source tree) puts it on your `PATH`; otherwise
 call it by its full path.
 

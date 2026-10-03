@@ -91,8 +91,8 @@ fi
 # sanity checks on the skill itself: only for the operations that read the tree
 [[ -f "$SRC/SKILL.md" ]] || die "$SRC/SKILL.md not found"
 grep -q "^name: $NAME\$" "$SRC/SKILL.md" || die "SKILL.md 'name:' must be $NAME (the directory name)"
-python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$SRC/scripts/rust-deps" \
-    || die "scripts/rust-deps has a syntax error"
+python3 -m compileall -q "$SRC/scripts" \
+    || die "scripts/rust-deps or the rust_deps package has a syntax error"
 find "$SRC" -name __pycache__ -type d -prune -exec rm -rf {} +
 chmod +x "$SRC/scripts/rust-deps"
 
