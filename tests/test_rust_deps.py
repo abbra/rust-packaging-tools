@@ -946,22 +946,65 @@ def test_tui_package_rows_reports_tree_state(tmp_path):
     (tmp_path / "b" / "b-fix-metadata.diff").write_text("x")
     (tmp_path / "b" / "rust-b-0.2.0-1.fc45.src.rpm").write_text("")
     headers, rows = rd.tui_package_rows(tmp_path)
-    assert headers == ["crate", "version", "spec", "patch", "srpm", "tests", "review", "scope"]
-    assert rows[0] == ["a", "0.1.0", "yes", "-", "-", "-", "-", "everywhere"]
-    assert rows[1] == ["b", "0.2.0", "yes", "yes", "yes", "yes", "-", "everywhere"]
+    assert headers == ["crate", "version", "spec", "patch", "srpm", "tests", "stage", "scope"]
+    assert rows[0] == ["a", "0.1.0", "yes", "-", "-", "-", "tests?", "everywhere"]
+    assert rows[1] == ["b", "0.2.0", "yes", "yes", "yes", "yes", "review", "everywhere"]
+
+
+def test_tui_stage_follows_the_lifecycle_graph(tmp_path):
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    pkg = rd.local_packages(tmp_path)["a"]
+    assert rd.tui_stage(pkg).name == "tests?"  # spec exists, no [tests] yet
+    (tmp_path / "a" / "rust2rpm.toml").write_text("[tests]\n")
+    assert rd.tui_stage(pkg).name == "srpm?"
+    (tmp_path / "a" / "rust-a-0.1.0-1.fc45.src.rpm").write_text("")
+    assert rd.tui_stage(pkg).name == "review"
+    (tmp_path / "a" / rd.REQUEST_DRAFT).write_text("Summary: x")
+    assert rd.tui_stage(pkg).name == "draft"
+    (tmp_path / "a" / rd.REQUEST_STATE).write_text('{"bug": 1}\n')
+    assert rd.tui_stage(pkg).name == "filed"
+    # the adopted branch leaves the review line; the build stages still come first
+    (tmp_path / "a" / rd.DIST_GIT_FILE).write_text('[dist-git]\npackage = "rust-a"\n')
+    assert rd.tui_stage(pkg).name == "adopted"
+    (tmp_path / "a" / rd.REQUEST_STATE).unlink()
+    (tmp_path / "a" / "rust-a-0.1.0-1.fc45.src.rpm").unlink()
+    assert rd.tui_stage(pkg).name == "srpm?"  # the build stages still come first
+    (tmp_path / "a" / rd.DIST_GIT_FILE).unlink()
+    (tmp_path / "a" / "rust-a-0.1.0-1.fc45.src.rpm").write_text("")
+    (tmp_path / "a" / rd.TARGETS_FILE).write_text('only = ["fedora-44"]\n')
+    assert rd.tui_stage(pkg).name == "targets"
 
 
 def test_tui_suggestions_follow_the_workflow(tmp_path):
     assert [c for c, _, _, _ in rd.tui_suggestions(tmp_path)] == ["resolve", "init"]
     make_package(tmp_path, "a", "rust-a", "0.1.0")
     cmds = {c: (crates, flags) for c, crates, flags, _ in rd.tui_suggestions(tmp_path)}
-    assert cmds["trial"][0] == ["a"] and cmds["srpm"][0] == ["a"]  # no [tests], no SRPM yet
-    assert cmds["trial"][1] == ["discover"] and cmds["srpm"][1] == []
+    # a package is suggested exactly the edge that comes next for it
+    assert list(cmds) == ["trial"]
+    assert cmds["trial"] == (["a"], ["discover"])
     (tmp_path / "a" / "rust2rpm.toml").write_text("[tests]\n")
+    cmds = {c: (crates, flags) for c, crates, flags, _ in rd.tui_suggestions(tmp_path)}
+    assert list(cmds) == ["srpm"] and cmds["srpm"] == (["a"], [])
     (tmp_path / "a" / "rust-a-0.1.0-1.fc45.src.rpm").write_text("")
     cmds = {c: (crates, flags) for c, crates, flags, _ in rd.tui_suggestions(tmp_path)}
     assert "trial" not in cmds and "srpm" not in cmds
     assert cmds["review-plan"][0] == ["a"] and "status" in cmds
+
+
+def test_tui_suggestions_group_crates_by_stage(tmp_path):
+    make_package(tmp_path, "a", "rust-a", "0.1.0")  # at tests?
+    make_package(tmp_path, "b", "rust-b", "0.2.0")  # built, at review
+    (tmp_path / "b" / "rust2rpm.toml").write_text("[tests]\n")
+    (tmp_path / "b" / "rust-b-0.2.0-1.fc45.src.rpm").write_text("")
+    out = rd.tui_suggestions(tmp_path)
+    assert [(c, cr, fl) for c, cr, fl, _ in out] == [
+        ("trial", ["a"], ["discover"]),
+        ("review-plan", ["b"], []),
+        ("status", [], []),
+    ]
+    # each suggestion names the stage it is an edge out of
+    assert [why.split(":")[0] for _, _, _, why in out] == ["tests?", "review",
+                                                            "packaged vs. crates.io vs. the Fedora releases"]
 
 
 def test_tui_argv_from_form_values():
@@ -1146,8 +1189,8 @@ def test_tui_app_overview_jumps_with_crates_picked(tmp_path):
             # the app opens on the Overview, showing the tree state
             assert app.query_one("#screens", ContentSwitcher).current == "overview"
             assert app.query_one("#pkg-table", DataTable).row_count == 1
-            # a package without [tests] and without an SRPM suggests exactly trial, then srpm
-            assert [c for c, _, _, _ in app._suggestions] == ["trial", "srpm"]
+            # a package without [tests] is suggested exactly the next edge: trial
+            assert [c for c, _, _, _ in app._suggestions] == ["trial"]
             suggestions = app.query_one("#suggestions", OptionList)
             app.on_option_list_option_selected(
                 OptionList.OptionSelected(suggestions, suggestions.get_option_at_index(0), 0))
