@@ -65,7 +65,9 @@ find "$SRC" -name __pycache__ -type d -prune -exec rm -rf {} +
 chmod +x "$SRC/scripts/rust-deps"
 
 is_ours() {  # is $1 an installed copy/link of this skill?
-    [[ -L "$1" ]] || grep -qs "^name: $NAME\$" "$1/SKILL.md"
+    # a live copy or link must carry this skill's SKILL.md; only a dangling
+    # link, which is what --link leaves when the checkout moves, counts as ours
+    [[ -L "$1" && ! -e "$1/SKILL.md" ]] || grep -qs "^name: $NAME\$" "$1/SKILL.md"
 }
 
 # ── uninstall ────────────────────────────────────────────────────────────────
@@ -79,6 +81,8 @@ if [[ $uninstall == 1 ]]; then
         fi
     done
     if [[ -n "$bin" && -L "$bin/rust-deps" ]]; then
+        [[ $(readlink "$bin/rust-deps") == */$NAME/scripts/rust-deps ]] \
+            || die "$bin/rust-deps does not link to this skill; not removing it"
         rm -f "$bin/rust-deps"
         echo "removed $bin/rust-deps"
     fi
@@ -113,7 +117,9 @@ fi
 
 if [[ -n "$zip" ]]; then
     [[ "$zip" == *.zip ]] || zip="$zip.zip"
-    rm -f "$zip"
+    if [[ -e "$zip" ]] && ! python3 -c 'import sys, zipfile; sys.exit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)' "$zip"; then
+        die "$zip exists and not a zip archive; not overwriting it"
+    fi
     (cd "$HERE" && python3 -m zipfile -c "$zip" "$NAME")
     echo "packed    $zip"
 fi
