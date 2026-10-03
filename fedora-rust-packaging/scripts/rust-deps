@@ -13,6 +13,7 @@ Every package lives in <root>/<crate>/ and is driven by rust2rpm:
 The package root is --root DIR, else $RUST_DEPS_ROOT, else the current
 directory.  The full manual is references/MANUAL.md in the
 fedora-rust-packaging skill; 'rust-deps doctor' checks the prerequisites.
+'rust-deps tui' presents all of the commands in a text UI (python3-textual).
 """
 
 from __future__ import annotations
@@ -4126,14 +4127,887 @@ def cmd_doctor(args) -> None:
         die("install the missing tools listed above")
 
 
+# ─── TUI ─────────────────────────────────────────────────────────────────────
+# 'rust-deps tui' presents the whole workflow in a text UI (python3-textual).
+# Its home screen is an Overview: the state of the packages under the root and
+# the next steps it implies, each jumping to the command with the crates
+# picked.  Forms are generated from the same argparse parser as the command
+# line, so the UI cannot drift from it; the parser's structure decides the
+# widget (crate picker, mode choice for exclusive groups, rows for repeatable
+# options, Run gated on required arguments).  Each command runs as a
+# 'rust-deps' subprocess whose output streams into the view: block headers and
+# verdict words are colored, and 'status', 'doctor' and any '--json' result are
+# additionally rendered as a table.  The Textual APIs used here exist unchanged
+# in Textual 4 (Fedora 44) and Textual 8.
+
+TUI_SECTIONS = [
+    ("Setup", ["doctor", "status"]),
+    ("Missing crates", ["resolve", "order", "check-targets"]),
+    ("Create", ["init", "regen", "update"]),
+    ("Test", ["trial"]),
+    ("Build", ["srpm", "mock-chain", "copr", "tmt"]),
+    ("COPR builds", ["copr-status", "copr-log"]),
+    ("Review", ["review", "review-request", "review-plan", "review-status"]),
+    ("In Fedora", ["adopt", "dist-git"]),
+]
+
+
+@dataclass
+class TuiField:
+    """One form control, derived from an argparse action."""
+    kind: str  # "text" | "multi" | "number" | "flag"
+    dest: str
+    key: str  # unique per form: 'regen' has --compat and --no-compat sharing a dest
+    options: list[str]  # the option string to pass; empty for positionals
+    label: str
+    metavar: str
+    help: str
+    required: bool
+    default: str
+    positional: bool
+    group: int = -1  # index of its mutually exclusive group, -1 for none
+
+
+@dataclass
+class TuiControl:
+    """A rendered unit of a form, shaped by what the parser says the options are:
+    'crates' = the positional selection plus --all (the with_sel pattern);
+    'choice' = one mutually exclusive group; 'multi' = a repeatable option;
+    'field' = a single option."""
+    kind: str
+    fields: list[TuiField]
+
+
+def tui_option(action: argparse.Action) -> str:
+    """The option string the UI passes: the long form when there is one."""
+    return next((o for o in action.option_strings if o.startswith("--")), action.option_strings[0])
+
+
+def tui_fields(parser: argparse.ArgumentParser) -> list[TuiField]:
+    """The form of one subcommand, generated from its argparse actions."""
+    fields: list[TuiField] = []
+    seen: collections.Counter = collections.Counter()
+    groups = {id(a): gi for gi, g in enumerate(parser._mutually_exclusive_groups)
+              for a in g._group_actions}
+    for action in parser._actions:
+        if action.dest == "help" or isinstance(action, argparse._SubParsersAction):
+            continue
+        seen[action.dest] += 1
+        key = action.dest if seen[action.dest] == 1 else f"{action.dest}-{seen[action.dest]}"
+        metavar = action.metavar or action.dest.replace("_", "-").upper()
+        label = "/".join(action.option_strings) or metavar
+        default = "" if action.default in (None, [], False) else str(action.default)
+        help_text = (action.help or "").replace("%(default)s", default or str(action.default))
+        cls = type(action).__name__
+        group = groups.get(id(action), -1)
+        if not action.option_strings:  # positional
+            kind = "multi" if action.nargs in ("*", "+") else "text"
+            fields.append(TuiField(kind, action.dest, key, [], metavar, metavar, help_text,
+                                   action.nargs == "+", "", True, group))
+        elif cls in ("_StoreTrueAction", "_StoreFalseAction"):
+            fields.append(TuiField("flag", action.dest, key, [tui_option(action)], label, "",
+                                   help_text, False, "", False, group))
+        elif cls == "_AppendAction":
+            fields.append(TuiField("multi", action.dest, key, [tui_option(action)], label, metavar,
+                                   help_text, action.required, "", False, group))
+        elif action.type is int:
+            fields.append(TuiField("number", action.dest, key, [tui_option(action)], label, metavar,
+                                   help_text, action.required, default, False, group))
+        else:
+            fields.append(TuiField("text", action.dest, key, [tui_option(action)], label, metavar,
+                                   help_text, action.required, default, False, group))
+    return fields
+
+
+def tui_controls(parser: argparse.ArgumentParser) -> list[TuiControl]:
+    """Group the fields into controls that match the parser's own structure."""
+    fields = tui_fields(parser)
+    controls: list[TuiControl] = []
+    absorbed: set[str] = set()
+    for i, f in enumerate(fields):
+        if f.key in absorbed:
+            continue
+        if f.positional and f.dest == "crates":  # with_sel: the crate picker absorbs --all
+            members = [f]
+            nxt = fields[i + 1] if i + 1 < len(fields) else None
+            if nxt is not None and nxt.kind == "flag" and nxt.dest == "all":
+                members.append(nxt)
+                absorbed.add(nxt.key)
+            controls.append(TuiControl("crates", members))
+        elif f.group >= 0:
+            members = [later for later in fields[i:] if later.group == f.group]
+            absorbed.update(m.key for m in members)
+            controls.append(TuiControl("choice", members))
+        elif f.kind == "multi":
+            controls.append(TuiControl("multi", [f]))
+        else:
+            controls.append(TuiControl("field", [f]))
+    return controls
+
+
+def tui_missing_required(fields: list[TuiField], values: dict) -> list[str]:
+    """Labels of required arguments the form does not have yet."""
+    missing = []
+    for f in fields:
+        if not f.required:
+            continue
+        v = values.get(f.key)
+        if (not v) or (isinstance(v, str) and not v.split()):
+            missing.append(f.label)
+    return missing
+
+
+def _overview_packages(root: Path) -> list[LocalPackage]:
+    return sorted(local_packages(root).values(), key=lambda p: p.crate)
+
+
+def has_srpm(pkg: LocalPackage) -> bool:
+    return bool(pkg.version and list(pkg.dir.glob(f"{pkg.rpm_name}-{pkg.version}-*.src.rpm")))
+
+
+def has_tests(pkg: LocalPackage) -> bool:
+    return "[tests]" in (pkg.config_file.read_text() if pkg.config_file.exists() else "")
+
+
+def tui_package_rows(root: Path) -> tuple[list[str], list[list[str]]]:
+    """The Overview table: what each package under the root actually has."""
+    headers = ["crate", "version", "spec", "patch", "srpm", "tests", "review", "scope"]
+    rows = []
+    for pkg in _overview_packages(root):
+        if (pkg.dir / REQUEST_STATE).exists():
+            review = "filed"
+        elif (pkg.dir / REQUEST_DRAFT).exists():
+            review = "draft"
+        else:
+            review = "-"
+        rows.append([
+            pkg.crate + (" (compat)" if pkg.compat else ""),
+            pkg.version or "-",
+            "yes" if pkg.version else "-",
+            "yes" if (pkg.dir / f"{pkg.crate}-fix-metadata.diff").exists() else "-",
+            "yes" if has_srpm(pkg) else "-",
+            "yes" if has_tests(pkg) else "-",
+            review,
+            pkg.scope,
+        ])
+    return headers, rows
+
+
+def tui_suggestions(root: Path) -> list[tuple[str, list[str], list[str], str]]:
+    """Next steps implied by the tree state: (command, crates to preselect,
+    flag field keys to pre-check, why).
+    Mirrors the Quick start order of the manual; everything here is local."""
+    pkgs = _overview_packages(root)
+    if not pkgs:
+        return [("resolve", [], [], "nothing under this root yet: find the crates a project needs"),
+                ("init", [], [], "or create packages directly")]
+    out: list[tuple[str, list[str], list[str], str]] = []
+    no_spec = [p.crate for p in pkgs if not p.version]
+    no_tests = [p.crate for p in pkgs if p.version and not has_tests(p)]
+    no_srpm = [p.crate for p in pkgs if p.version and not has_srpm(p)]
+    built = [p.crate for p in pkgs if has_srpm(p)]
+    if no_spec:
+        out.append(("regen", no_spec, [], "no generated spec for these packages"))
+    if no_tests:
+        out.append(("trial", no_tests, ["discover"],
+                    "no [tests] in rust2rpm.toml: trial --discover picks what can run"))
+    if no_srpm:
+        out.append(("srpm", no_srpm, [], "no SRPM built for the current version"))
+    if built:
+        out.append(("review-plan", built, [], "what to submit for review, in which order"))
+        out.append(("status", [], [], "packaged vs. crates.io vs. the Fedora releases"))
+    return out
+
+
+_TRIAL_HEADER_RE = re.compile(r"^== trial (\S+) (\S+) \(log: (.*)\)$")
+_TRIAL_STATUS_RE = re.compile(r"^   (\S.*?)\s{2,}(ok|FAILED|BROKEN|skipped)\s+(.*)$")
+
+
+def parse_trial_output(lines: list[str]) -> list[dict]:
+    """The 'trial' blocks as rows: crate, version, target, verdict, summary, first error.
+
+    Each row also carries its block's mode: 'plain' runs the spec's invocations,
+    'discover' tried every target and suggested a [tests] table, 'recheck' is the
+    verification trial --apply chains after writing that table.
+    """
+    blocks: list[dict] = []
+    cur: dict | None = None
+    for line in lines:
+        if m := _TRIAL_HEADER_RE.match(line):
+            cur = {"crate": m.group(1), "version": m.group(2), "log": m.group(3),
+                   "rows": [], "suggested": False, "applied": False}
+            blocks.append(cur)
+            continue
+        if cur is None:
+            continue
+        if m := _TRIAL_STATUS_RE.match(line):
+            cur["rows"].append({"target": m.group(1).strip(), "status": m.group(2),
+                                "summary": m.group(3).strip(), "detail": ""})
+        elif line.startswith("      ") and cur["rows"]:
+            if not cur["rows"][-1]["detail"]:
+                cur["rows"][-1]["detail"] = line.strip()
+        elif "Suggested [tests] table" in line or "no [tests] restrictions needed" in line:
+            cur["suggested"] = True
+        elif "Written to " in line and "regenerating the spec" in line:
+            cur["applied"] = True
+    rows: list[dict] = []
+    for b in blocks:
+        mode = ("recheck" if b["log"].endswith(".recheck.log")
+                else "discover" if b["suggested"] else "plain")
+        for r in b["rows"]:
+            rows.append({"crate": b["crate"], "version": b["version"], "log": b["log"],
+                         "mode": mode, "applied": b["applied"], **r})
+    return rows
+
+
+def tui_trial_actions(rows: list[dict]) -> list[tuple[str, list[str], list[str], str]]:
+    """Next steps implied by a trial run, plain or discovery.  The last block per
+    crate decides: --apply chains a recheck after writing the suggested table."""
+    last: dict[str, dict] = {}
+    for r in rows:
+        blk = last.setdefault(r["crate"], {"mode": "plain", "failed": [], "log": ""})
+        if r["log"] != blk["log"]:
+            blk = {"mode": r["mode"], "failed": [], "log": r["log"]}
+            last[r["crate"]] = blk
+        if r["status"] in ("FAILED", "BROKEN"):
+            blk["failed"].append(r["target"])
+
+    def group(pred) -> list[str]:
+        return sorted(c for c, b in last.items() if pred(b))
+
+    out: list[tuple[str, list[str], list[str], str]] = []
+    # a discovery that found failures has already produced the suggestion: apply it
+    if s := group(lambda b: b["mode"] == "discover" and b["failed"]):
+        out.append(("trial", s, ["discover", "apply"],
+                    "a [tests] table was suggested: --apply writes it, regenerates and rechecks"))
+    for c in group(lambda b: b["mode"] == "plain" and b["failed"]):
+        out.append(("trial", [c], ["discover"],
+                    f"{', '.join(last[c]['failed'])} failed: --discover suggests the [tests] table that skips them"))
+    if s := group(lambda b: b["mode"] == "recheck" and b["failed"]):
+        out.append(("trial", s, ["discover"],
+                    "the applied table still fails: --discover suggests another one"))
+    if s := group(lambda b: b["mode"] == "recheck" and not b["failed"]):
+        out.append(("regen", s, [],
+                    "the applied table passes: replace its TODO comments with real reasons, then regen"))
+    if s := group(lambda b: not b["failed"] and b["mode"] != "recheck"):
+        out.append(("srpm", s, [], "all their test targets pass: build the SRPMs"))
+    return out
+
+
+def tui_argv(fields: list[TuiField], values: dict) -> list[str]:
+    """Turn form values into command-line arguments; empty fields are left out."""
+    argv: list[str] = []
+    for f in fields:
+        v = values.get(f.key)
+        if f.kind == "flag":
+            if v:
+                argv.append(f.options[0])
+        elif f.kind == "multi":
+            for part in str(v or "").split():
+                if f.positional:
+                    argv.append(part)
+                else:
+                    argv.extend((f.options[0], part))
+        elif v not in (None, ""):
+            if not f.positional:
+                argv.append(f.options[0])
+            argv.append(str(v))
+    return argv
+
+
+def split_columns(line: str) -> list[str]:
+    """The cells of an aligned output line: columns are separated by 2+ spaces."""
+    return [p for p in re.split(r"\s{2,}", line.strip()) if p]
+
+
+_HEADER_CELL_RE = re.compile(r"[A-Za-z][A-Za-z0-9._+/-]{0,31}")
+
+
+def parse_columns_table(lines: list[str]) -> tuple[list[str], list[list[str]]] | None:
+    """The 'status' format: a header row of short tokens followed by rows with the
+    same column count."""
+    for i, line in enumerate(lines):
+        cells = split_columns(line)
+        if len(cells) < 3 or not all(_HEADER_CELL_RE.fullmatch(c) for c in cells):
+            continue
+        rows: list[list[str]] = []
+        for following in lines[i + 1:]:
+            more = split_columns(following)
+            if len(more) != len(cells):
+                break
+            rows.append(more)
+        if rows:
+            return cells, rows
+    return None
+
+
+_STATE_LINE_RE = re.compile(r"^\s{3}(ok|absent|MISSING|WARNING|root)\s+(\S+)?\s*(.*)$")
+
+
+def parse_state_table(lines: list[str]) -> tuple[list[str], list[list[str]]] | None:
+    """The 'doctor' format: a state word, a tool or check name, and a detail."""
+    rows: list[list[str]] = []
+    for line in lines:
+        m = _STATE_LINE_RE.match(line)
+        if not m:
+            return None
+        state, name, detail = m.groups()
+        rows.append([state, name or "", detail])
+    if len(rows) < 3:
+        return None
+    return ["state", "tool", "detail"], rows
+
+
+def parse_json_table(data: object) -> tuple[list[str], list[list[str]]] | None:
+    """Render a '--json' result as a table: arrays of arrays as build stages,
+    arrays of objects by their keys, an object as key/value."""
+    if not data:
+        return None
+    def cell(v: object) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, (str, int, float, bool)):
+            return str(v)
+        return json.dumps(v, separators=(",", " "))
+    if isinstance(data, list) and data and all(isinstance(x, list) for x in data):
+        return ["stage", "packages"], [[str(i + 1), " ".join(cell(x) for x in row)]
+                                      for i, row in enumerate(data)]
+    if isinstance(data, list) and data and all(isinstance(x, dict) for x in data):
+        columns = list(dict.fromkeys(k for row in data for k in row))
+        return columns, [[cell(row.get(c)) for c in columns] for row in data]
+    if isinstance(data, dict):
+        return ["key", "value"], [[k, cell(v)] for k, v in data.items()]
+    if isinstance(data, list):
+        return ["value"], [[cell(v)] for v in data]
+    return None
+
+
+_TUI_LINE_STYLES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^ERROR:"), "bold red"),
+    (re.compile(r"^ACTION NEEDED:"), "bold magenta"),
+    (re.compile(r"^WARNING:"), "yellow"),
+    (re.compile(r"^=+ "), "bold cyan"),  # '== package' and '=== stage' blocks
+    (re.compile(r"^\$ "), "dim"),  # echoed tool commands
+    (re.compile(r"^(NEW|UPDATE|FEATURES)(?=\s)"), "cyan"),  # resolve verdicts
+    (re.compile(r"^\s*(ok|root)(?=\s|$)"), "green"),
+    (re.compile(r"^\s*(MISSING|FAILED)(?=\s|$)"), "bold red"),
+    (re.compile(r"^\s*(BUILDING|WAIT|RETRY|BLOCKED|absent|WARNING)(?=\s|$)"), "yellow"),
+    (re.compile(r"^\s*\[!\]"), "bold red"),  # unexplained review issues
+    (re.compile(r"^\s*\[~\]"), "dim yellow"),  # expected review issues
+    (re.compile(r"^(summary:|next:|stage \d+:)"), "bold"),
+]
+
+
+def tui_line_style(line: str) -> str:
+    """The color of an output line, by the diagnostic prefix it starts with."""
+    for pattern, style in _TUI_LINE_STYLES:
+        if pattern.search(line):
+            return style
+    return ""
+
+
+def make_tui_app() -> type:
+    """The Textual app class.  Imports textual, so only 'tui' needs it."""
+    import shlex
+    import threading
+    from rich.text import Text
+    from textual import work
+    from textual.app import App, ComposeResult
+    from textual.containers import Horizontal, Vertical
+    from textual.widgets import (Button, Checkbox, ContentSwitcher, DataTable, Footer,
+                                 Header, Input, Label, OptionList, RichLog, Select, Static, Tabs)
+    from textual.widgets.option_list import Option
+    from textual.widgets._tabs import Tab  # same signature in Textual 4 and 8
+
+    parser = build_parser()
+    subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    briefs = {action.dest: action.help or "" for action in subparsers._choices_actions}
+    commands = {name: (briefs.get(name, ""), tui_fields(sub), tui_controls(sub))
+                for name, sub in subparsers.choices.items() if name != "tui"}
+
+    class RustDepsTUI(App):
+        TITLE = "rust-deps"
+        CSS = """
+            #body { height: 1fr; }
+            #sidebar { width: 24; }
+            #sidebar-title { padding: 0 1; }
+            #commands { height: 1fr; }
+            #screens { width: 1fr; }
+            #overview { width: 1fr; padding: 0 1; }
+            #overview .field-label { color: $text-muted; }
+            #pkg-table { height: 1fr; }
+            #suggestions { height: 1fr; }
+            #work { width: 1fr; }
+            #cmd-help { height: auto; max-height: 3; padding: 0 1; }
+            #form { height: auto; max-height: 16; }
+            #form-crates, #form-options { width: 1fr; padding: 0 1; overflow-y: auto; }
+            #form .field-label { color: $text-muted; }
+            #form Input { width: 100%; }
+            #form Select { width: 100%; }
+            #form Horizontal { width: 100%; }
+            #form Horizontal Input { width: 1fr; }
+            #runbar { padding: 0 1; }
+            #preview { width: 1fr; }
+            #view { height: 1fr; }
+            #table { width: 1fr; height: 1fr; }
+            #result-table { height: 1fr; }
+            #result-actions-label { color: $text-muted; }
+            #result-actions { height: auto; max-height: 9; }
+        """
+        BINDINGS = [
+            ("ctrl+r", "run_command", "Run"),
+            ("escape", "cancel_command", "Cancel"),
+        ]
+
+        def __init__(self, root: Path) -> None:
+            super().__init__()
+            self.root = root
+            self._cmd: str | None = None
+            self._fields: list[TuiField] = []
+            self._widgets: dict[str, object] = {}
+            self._proc = None
+            self._stdout: list[str] = []
+            self._rebuild = None
+            self._cmd_running = False  # App._running is Textual's own; do not shadow it
+            self._crate_boxes: dict[str, object] = {}
+            self._crate_extra = None
+            self._selects: dict[int, object] = {}
+            self._choice_inputs: dict[int, object] = {}
+            self._multi_rows: dict[str, list] = {}
+            self._multi_next: collections.Counter = collections.Counter()
+            self._gen = 0
+            self._prefill: set[str] = set()
+            self._prefill_flags: set[str] = set()
+            self._suggestions: list[tuple[str, list[str], list[str], str]] = []
+            self._result_actions: list[tuple[str, list[str], list[str], str]] = []
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            with Horizontal(id="body"):
+                with Vertical(id="sidebar"):
+                    yield Label("Commands", id="sidebar-title")
+                    yield OptionList(id="commands")
+                with ContentSwitcher(id="screens", initial="overview"):
+                    with Vertical(id="overview"):
+                        yield Label("packages under the root", classes="field-label")
+                        yield DataTable(id="pkg-table", zebra_stripes=True, cursor_type="row")
+                        yield Label("next steps (select to jump with the crates picked)",
+                                    classes="field-label")
+                        yield OptionList(id="suggestions")
+                    with Vertical(id="work"):
+                        yield Static("", id="cmd-help")
+                        # crate picker and options sit side by side: both stay visible
+                        # instead of the options hiding below a long crate list
+                        with Horizontal(id="form"):
+                            yield Vertical(id="form-crates")
+                            yield Vertical(id="form-options")
+                        with Horizontal(id="runbar"):
+                            yield Button("Run", id="run", variant="primary")
+                            yield Button("Cancel", id="cancel", disabled=True)
+                            yield Static("", id="preview")
+                        # tab ids must match the ContentSwitcher children's ids
+                        yield Tabs(Tab("Log", id="log"), Tab("Table", id="table"), id="tabs")
+                        with ContentSwitcher(id="view", initial="log"):
+                            yield RichLog(id="log", markup=False, wrap=True)
+                            with Vertical(id="table"):
+                                yield DataTable(id="result-table", zebra_stripes=True,
+                                                cursor_type="row")
+                                yield Label("", id="result-actions-label")
+                                yield OptionList(id="result-actions")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.sub_title = f"{self.root}  ({len(local_packages(self.root))} packages)"
+            options = self.query_one("#commands", OptionList)
+            listed = set()
+            options.add_option(Option("Overview", id="overview"))
+            for title, names in TUI_SECTIONS:
+                options.add_option(Option(f"[b]{title}[/b]", disabled=True))
+                for name in names:
+                    if name in commands:
+                        options.add_option(Option(name, id=name))
+                        listed.add(name)
+            for name in sorted(set(commands) - listed):  # commands added later still show up
+                options.add_option(Option(name, id=name))
+            self.query_one("#run", Button).disabled = True  # until a command is picked
+            self._refresh_overview()
+
+        def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+            if event.option_list.id in ("suggestions", "result-actions"):
+                src = (self._suggestions if event.option_list.id == "suggestions"
+                       else self._result_actions)
+                cmd, crates, flags, _ = src[event.option_index]
+                self.query_one("#screens", ContentSwitcher).current = "work"
+                self._show(cmd, prefill=crates, flags=flags)
+            elif event.option_id == "overview":
+                self._refresh_overview()
+                self.query_one("#screens", ContentSwitcher).current = "overview"
+            else:
+                self.query_one("#screens", ContentSwitcher).current = "work"
+                self._show(event.option_id)
+
+        def _fill_actions(self, options: OptionList,
+                         actions: list[tuple[str, list[str], list[str], str]]) -> None:
+            options.clear_options()
+            for i, (cmd, crates, flags, why) in enumerate(actions):
+                picked = " ".join(crates[:3]) + (" …" if len(crates) > 3 else "")
+                if flags:
+                    picked += " " + " ".join(
+                        next(f.label for f in commands[cmd][1] if f.key == key) for key in flags)
+                prompt = Text()  # a Text renderable: reasons may contain '[tests]' etc.
+                prompt.append(cmd + " ", style="bold")
+                if picked:
+                    prompt.append(picked + "  ")
+                prompt.append(why, style="dim")
+                options.add_option(Option(prompt, id=f"act-{i}"))
+
+        def _refresh_overview(self) -> None:
+            headers, rows = tui_package_rows(self.root)
+            table = self.query_one("#pkg-table", DataTable)
+            table.clear()
+            table.add_columns(*headers)
+            for row in rows:
+                table.add_row(*row)
+            self._suggestions = tui_suggestions(self.root)
+            self._fill_actions(self.query_one("#suggestions", OptionList), self._suggestions)
+
+        def _show(self, name: str, prefill: list[str] | None = None,
+                  flags: list[str] | None = None) -> None:
+            self._cancel_proc()
+            self._cmd = name
+            self._prefill = set(prefill or [])
+            self._prefill_flags = set(flags or [])
+            help_text, fields, controls = commands[name]
+            self.query_one("#cmd-help", Static).update(Text(f"{name} — {help_text}"))
+            async def rebuild() -> None:
+                # form ids are namespaced per generation: the previous form's widgets
+                # stay registered until their async teardown completes, so ids must not
+                # repeat; and mounts are awaited so widgets are ready to use at once
+                self._gen += 1
+                crates_pane = self.query_one("#form-crates", Vertical)
+                options_pane = self.query_one("#form-options", Vertical)
+                await crates_pane.remove_children()
+                await options_pane.remove_children()
+                self._fields, self._widgets = fields, {}
+                self._crate_boxes, self._crate_extra = {}, None
+                self._selects, self._choice_inputs = {}, {}
+                self._multi_rows, self._multi_next = {}, collections.Counter()
+                has_crates = has_options = False
+                for c in controls:
+                    if c.kind == "crates":
+                        await self._render_crates(crates_pane, c)
+                        has_crates = True
+                    elif c.kind == "choice":
+                        await self._render_choice(options_pane, c)
+                        has_options = True
+                    elif c.kind == "multi":
+                        await self._render_multi(options_pane, c)
+                        has_options = True
+                    else:
+                        await self._render_field(options_pane, c.fields[0])
+                        has_options = True
+                crates_pane.display = has_crates
+                options_pane.display = has_options
+                self._update_preview()
+            self._rebuild = self.run_worker(rebuild(), exclusive=True, group="form")
+
+        def _wid(self, key: str) -> str:
+            return f"z{self._gen}-{key}"
+
+        async def _render_field(self, form: Vertical, f: TuiField) -> None:
+            widget_id = self._wid(f"f-{f.key}")
+            if f.kind == "flag":
+                widget = Checkbox(self._option_label(f), value=f.key in self._prefill_flags,
+                                  compact=True, id=widget_id, tooltip=f.help or None)
+                await form.mount(widget)
+            else:
+                hint = f.metavar + (" (required)" if f.required else "")
+                if f.help:
+                    hint += " — " + textwrap.shorten(f.help, width=44, placeholder=" …")
+                widget = Input(value=f.default, placeholder=hint, id=widget_id,
+                               type="number" if f.kind == "number" else "text")
+                await form.mount(Label(f.label, classes="field-label"), widget)
+            self._widgets[f.key] = widget
+
+        @staticmethod
+        def _option_label(f: TuiField) -> Text:
+            """A flag as a readable row like the crate list: label plus short help."""
+            label = Text(f.label)
+            if f.help:
+                label.append("  " + textwrap.shorten(f.help, width=44, placeholder=" …"),
+                             style="dim")
+            return label
+
+        async def _render_crates(self, form: Vertical, c: TuiControl) -> None:
+            """The with_sel pattern: pick packages from the tree, name new crates, or take all."""
+            crates_field = c.fields[0]
+            pkgs = local_packages(self.root)
+            if pkgs:
+                await form.mount(Label("packages under the root", classes="field-label"))
+                for crate in sorted(pkgs):
+                    box = Checkbox(f"{crate}  {pkgs[crate].version or ''}",
+                                   value=crate in self._prefill, compact=True,
+                                   id=self._wid(f"pk-{re.sub(r'[^A-Za-z0-9_-]', '_', crate)}"))
+                    await form.mount(box)
+                    self._crate_boxes[crate] = box
+            hint = crates_field.metavar + " not in the tree; space-separated"
+            if crates_field.required:
+                hint += " (required)"
+            extra = Input(placeholder=hint, id=self._wid("f-crates-extra"))
+            await form.mount(Label("other crates", classes="field-label"), extra)
+            self._crate_extra = extra
+            all_field = next((f for f in c.fields if f.dest == "all"), None)
+            if all_field is not None:
+                box = Checkbox(self._option_label(all_field),
+                               value=all_field.key in self._prefill_flags, compact=True,
+                               id=self._wid(f"f-{all_field.key}"), tooltip=all_field.help or None)
+                await form.mount(box)
+                self._widgets[all_field.key] = box
+
+        async def _render_choice(self, form: Vertical, c: TuiControl) -> None:
+            """A mutually exclusive group: one mode, its value input appears when needed."""
+            gi = c.fields[0].group
+            select = Select([(f.label, f.key) for f in c.fields], allow_blank=True,
+                            prompt=" / ".join(f.label for f in c.fields), id=self._wid(f"g-{gi}"),
+                            tooltip="mutually exclusive options")
+            holder = Vertical(id=self._wid(f"c-{gi}"))
+            await form.mount(Label("choose one of: " + "  ".join(f.label for f in c.fields),
+                                   classes="field-label"), select, holder)
+            self._selects[gi] = select
+
+        async def _render_multi(self, form: Vertical, c: TuiControl) -> None:
+            """A repeatable option: rows of inputs with add/remove."""
+            f = c.fields[0]
+            hint = f.metavar + (" (required)" if f.required else "")
+            if f.help:
+                hint += " — " + textwrap.shorten(f.help, width=110, placeholder=" …")
+            holder = Vertical(id=self._wid(f"m-{f.key}"))
+            await form.mount(Label(f"{f.label} (repeatable)", classes="field-label"), holder,
+                             Button("+", id=self._wid(f"add-{f.key}"),
+                                    tooltip=f"add another {f.options[0]}"))
+            self._multi_rows[f.key] = []
+            self._multi_next[f.key] = 0
+            self._add_multi_row(holder, f, hint)
+
+        def _add_multi_row(self, holder: Vertical, f: TuiField, hint: str):
+            n = self._multi_next[f.key]
+            self._multi_next[f.key] += 1
+            widget = Input(placeholder=hint, id=self._wid(f"f-{f.key}-{n}"))
+            holder.mount(Horizontal(widget, Button("–", id=self._wid(f"rm-{f.key}-{n}"))))
+            self._multi_rows[f.key].append(widget)
+            return widget
+
+        def _values(self) -> dict:
+            out = {}
+            for f in self._fields:
+                if f.positional and f.dest == "crates":
+                    names = [crate for crate, box in self._crate_boxes.items() if box.value]
+                    extra = self._crate_extra.value.split() if self._crate_extra else []
+                    out[f.key] = " ".join(names + extra)
+                elif f.group >= 0:
+                    select = self._selects.get(f.group)
+                    chosen = select.value if select is not None else None
+                    if f.key != chosen:
+                        out[f.key] = False if f.kind == "flag" else ""
+                    elif f.kind == "flag":
+                        out[f.key] = True
+                    else:
+                        widget = self._choice_inputs.get(f.group)
+                        out[f.key] = widget.value if widget is not None else ""
+                elif f.kind == "multi" and not f.positional:
+                    out[f.key] = " ".join(r.value.strip() for r in self._multi_rows.get(f.key, [])
+                                          if r.value.strip())
+                else:
+                    widget = self._widgets.get(f.key)
+                    if widget is not None:
+                        out[f.key] = widget.value
+            return out
+
+        def _argv(self) -> list[str]:
+            return tui_argv(self._fields, self._values())
+
+        def _update_preview(self) -> None:
+            values = self._values()
+            argv = ["rust-deps", "--root", str(self.root), self._cmd or ""] + tui_argv(self._fields, values)
+            missing = tui_missing_required(self._fields, values)
+            text = " ".join(shlex.quote(a) for a in argv)
+            if missing:
+                text += "   —   needs: " + ", ".join(missing)
+            self.query_one("#preview", Static).update(Text(text))
+            self.query_one("#run", Button).disabled = bool(missing) or self._cmd_running or not self._cmd
+
+        def on_input_changed(self, event: Input.Changed) -> None:
+            self._update_preview()
+
+        def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+            self._update_preview()
+
+        async def on_select_changed(self, event: Select.Changed) -> None:
+            gi = int(str(event.select.id).rpartition("g-")[2])
+            holder = self.query_one(f"#{self._wid(f'c-{gi}')}", Vertical)
+            await holder.remove_children()
+            self._choice_inputs.pop(gi, None)
+            key = event.select.value
+            if key:
+                f = next(m for m in self._fields if m.key == key)
+                if f.kind in ("text", "number"):
+                    widget = Input(value=f.default, placeholder=f.metavar, id=self._wid(f"f-{f.key}"),
+                                   type="number" if f.kind == "number" else "text")
+                    await holder.mount(widget)
+                    self._choice_inputs[gi] = widget
+            self._update_preview()
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            bid = event.button.id or ""
+            if bid == "run":
+                self.action_run_command()
+            elif bid == "cancel":
+                self.action_cancel_command()
+            elif "-add-" in bid:
+                key = bid.partition("-add-")[2]
+                f = next(m for m in self._fields if m.key == key)
+                widget = self._add_multi_row(self.query_one(f"#{self._wid(f'm-{key}')}", Vertical),
+                                             f, f.metavar)
+                widget.focus()
+                self._update_preview()
+            elif "-rm-" in bid:
+                key, _, n = bid.partition("-rm-")[2].rpartition("-")
+                rows = self._multi_rows.get(key) or []
+                if len(rows) > 1:
+                    widget = next(r for r in rows if r.id == self._wid(f"f-{key}-{n}"))
+                    widget.parent.remove()
+                    rows.remove(widget)
+                    self._update_preview()
+
+        def action_run_command(self) -> None:
+            if not self._cmd or tui_missing_required(self._fields, self._values()):
+                return
+            argv = [sys.executable, str(Path(__file__).resolve()), "--root", str(self.root),
+                    self._cmd, *self._argv()]
+            log = self.query_one("#log", RichLog)
+            log.clear()
+            self.query_one("#result-table", DataTable).clear()
+            self._result_actions = []
+            self._fill_actions(self.query_one("#result-actions", OptionList), [])
+            self.query_one("#result-actions-label", Label).update("")
+            self._stdout = []
+            self._cmd_running = True
+            self.query_one("#run", Button).disabled = True
+            self.query_one("#cancel", Button).disabled = False
+            log.write(Text("$ " + " ".join(shlex.quote(a) for a in argv), style="dim"))
+            self.run_command(argv)
+
+        def action_cancel_command(self) -> None:
+            self._cancel_proc()
+
+        def _cancel_proc(self) -> None:
+            if self._proc is not None and self._proc.poll() is None:
+                self._proc.terminate()
+
+        # A thread worker with subprocess.Popen: Textual's terminal driver reaps
+        # child processes itself, which would leave an asyncio subprocess
+        # proc.wait() hanging on a zombie.  Its own exclusive group: switching
+        # commands (the form rebuild worker) must not cancel it mid-run.
+        @work(thread=True, exclusive=True, group="run")
+        def run_command(self, argv: list[str]) -> None:
+            code = 1
+            try:
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, errors="replace",
+                                       env={**os.environ, "RUST_DEPS_NO_HYPERLINKS": "1"})
+                self._proc = proc
+
+                def drain(pipe, is_stderr: bool) -> None:
+                    for raw in pipe:
+                        line = raw.rstrip("\r\n")
+                        if not is_stderr:
+                            self._stdout.append(line)
+                        self.call_from_thread(self._write_line, line, tui_line_style(line))
+                    pipe.close()
+
+                err = threading.Thread(target=drain, args=(proc.stderr, True), daemon=True)
+                err.start()
+                drain(proc.stdout, False)
+                err.join()
+                code = proc.wait()
+            except Exception as exc:
+                self.call_from_thread(self._write_line, f"ERROR: {exc}", "bold red")
+            finally:
+                self._proc = None
+            self.call_from_thread(self._finish_run, code)
+
+        def _write_line(self, line: str, style: str) -> None:
+            self.query_one("#log", RichLog).write(Text(line, style=style))
+
+        def _finish_run(self, code: int) -> None:
+            self._cmd_running = False
+            self.query_one("#cancel", Button).disabled = True
+            self._write_line(f"exit {code}", "bold red" if code else "dim")
+            self._render_structured()
+            self._update_preview()
+            self._refresh_overview()  # the tree just changed; keep the cockpit current
+
+        def _json_checked(self) -> bool:
+            widget = self._widgets.get("json")
+            return bool(widget is not None and widget.value)
+
+        def _render_structured(self) -> None:
+            parsed: tuple[list[str], list[list[str]]] | None = None
+            actions: list[tuple[str, list[str], list[str], str]] = []
+            if self._json_checked():
+                try:
+                    parsed = parse_json_table(json.loads("\n".join(self._stdout)))
+                except json.JSONDecodeError:
+                    parsed = None
+            elif self._cmd == "status":
+                parsed = parse_columns_table(self._stdout)
+            elif self._cmd == "doctor":
+                parsed = parse_state_table(self._stdout)
+            elif self._cmd == "trial":
+                # trial's verdict lines are the case where the log hides the shape:
+                # render them as a table and turn failures into next steps
+                trial_rows = parse_trial_output(self._stdout)
+                if trial_rows:
+                    parsed = (["crate", "version", "target", "status", "summary", "first error"],
+                              [[r["crate"], r["version"], r["target"], r["status"],
+                                r["summary"], r["detail"]] for r in trial_rows])
+                    actions = tui_trial_actions(trial_rows)
+            self._result_actions = actions
+            self._fill_actions(self.query_one("#result-actions", OptionList), actions)
+            self.query_one("#result-actions-label", Label).update(
+                "next steps from this run (select to jump)" if actions else "")
+            if parsed is None:
+                return
+            headers, rows = parsed
+            table = self.query_one("#result-table", DataTable)
+            table.clear()
+            table.add_columns(*headers)
+            for row in rows:
+                table.add_row(*row)
+            table.cursor_type = "row"
+            self.query_one("#tabs", Tabs).active = "table"
+
+        def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
+            if event.tab is not None:
+                self.query_one("#view", ContentSwitcher).current = event.tab.id
+
+    return RustDepsTUI
+
+
+def cmd_tui(args) -> None:
+    try:
+        app = make_tui_app()
+    except ImportError:
+        die("rust-deps tui needs python3-textual: dnf install python3-textual")
+    app(args.root).run()
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # quiet exit when piped into head
-    if os.environ.get(EDITOR_ENV) and len(sys.argv) == 2 and sys.argv[1].endswith("Cargo.toml"):
-        editor_mode(sys.argv[1])
-        return
-
+def build_parser() -> argparse.ArgumentParser:
+    """The whole CLI surface, built once; 'tui' generates its forms from it, so
+    the UI can never drift from the command line."""
     p = argparse.ArgumentParser(prog="rust-deps", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", type=Path, default=Path(os.environ.get(ROOT_ENV, ".")),
@@ -4347,6 +5221,19 @@ def main() -> None:
     sp.add_argument("--refresh", action="store_true", help="refresh the cached Fedora and crates.io data")
     sp.set_defaults(func=cmd_status)
 
+    sp = sub.add_parser("tui", help="text UI over all commands (needs python3-textual)")
+    sp.set_defaults(func=cmd_tui)
+
+    return p
+
+
+def main() -> None:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # quiet exit when piped into head
+    if os.environ.get(EDITOR_ENV) and len(sys.argv) == 2 and sys.argv[1].endswith("Cargo.toml"):
+        editor_mode(sys.argv[1])
+        return
+
+    p = build_parser()
     args = p.parse_args()
     args.root = args.root.resolve()
     if args.cmd not in ("doctor", "init") and not args.root.is_dir():
