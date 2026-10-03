@@ -886,9 +886,9 @@ def test_tui_trial_actions_turns_verdicts_into_next_steps():
         "      error: could not compile",
     ])
     actions = rd.tui_trial_actions(rows)
-    assert ("trial", ["b"], ["discover"], actions[0][3]) == actions[0]
+    assert ("trial", ["b"], ["discover"], {}, actions[0][4]) == actions[0]
     assert "discover" in actions[0][2]
-    assert ("srpm", ["a"], [], actions[1][3]) == actions[1]
+    assert ("srpm", ["a"], [], {}, actions[1][4]) == actions[1]
 
 
 def test_parse_trial_output_marks_discovery_and_recheck_blocks():
@@ -914,7 +914,7 @@ def test_tui_trial_actions_chain_discovery_to_apply_and_regen():
     ])
     actions = rd.tui_trial_actions(discovered)
     assert actions[0][:3] == ("trial", ["a"], ["discover", "apply"])
-    assert "rechecks" in actions[0][3]
+    assert "rechecks" in actions[0][4]
     applied_ok = rd.parse_trial_output([
         "== trial a 1.0 (log: /l/a.log)",
         "   test:x                     FAILED  0 passed, 1 failed",
@@ -924,8 +924,9 @@ def test_tui_trial_actions_chain_discovery_to_apply_and_regen():
         "   all                      ok      2 passed, 0 failed",
     ])
     actions = rd.tui_trial_actions(applied_ok)
-    assert actions[0][:3] == ("regen", ["a"], [])
-    assert "TODO" in actions[0][3]
+    # the applied table always carries TODO comments: the in-UI editor is the next step
+    assert actions[0][:3] == ("tests-edit", ["a"], [])
+    assert "reasons" in actions[0][4]
     applied_bad = rd.parse_trial_output([
         "== trial a 1.0 (log: /l/a.log)",
         "   test:x                     FAILED  0 passed, 1 failed",
@@ -936,7 +937,7 @@ def test_tui_trial_actions_chain_discovery_to_apply_and_regen():
     ])
     actions = rd.tui_trial_actions(applied_bad)
     assert actions[0][:3] == ("trial", ["a"], ["discover"])
-    assert "still fails" in actions[0][3]
+    assert "still fails" in actions[0][4]
 
 
 def test_parse_srpm_output_reads_srpm_blocks():
@@ -1000,17 +1001,17 @@ def test_tui_stage_follows_the_lifecycle_graph(tmp_path):
 
 
 def test_tui_suggestions_follow_the_workflow(tmp_path):
-    assert [c for c, _, _, _ in rd.tui_suggestions(tmp_path)] == ["resolve", "init"]
+    assert [c for c, _, _, _, _ in rd.tui_suggestions(tmp_path)] == ["resolve", "init"]
     make_package(tmp_path, "a", "rust-a", "0.1.0")
-    cmds = {c: (crates, flags) for c, crates, flags, _ in rd.tui_suggestions(tmp_path)}
+    cmds = {c: (crates, flags) for c, crates, flags, _, _ in rd.tui_suggestions(tmp_path)}
     # a package is suggested exactly the edge that comes next for it
     assert list(cmds) == ["trial"]
     assert cmds["trial"] == (["a"], ["discover"])
     (tmp_path / "a" / "rust2rpm.toml").write_text("[tests]\n")
-    cmds = {c: (crates, flags) for c, crates, flags, _ in rd.tui_suggestions(tmp_path)}
+    cmds = {c: (crates, flags) for c, crates, flags, _, _ in rd.tui_suggestions(tmp_path)}
     assert list(cmds) == ["srpm"] and cmds["srpm"] == (["a"], [])
     (tmp_path / "a" / "rust-a-0.1.0-1.fc45.src.rpm").write_text("")
-    cmds = {c: (crates, flags) for c, crates, flags, _ in rd.tui_suggestions(tmp_path)}
+    cmds = {c: (crates, flags) for c, crates, flags, _, _ in rd.tui_suggestions(tmp_path)}
     assert "trial" not in cmds and "srpm" not in cmds
     assert cmds["review-plan"][0] == ["a"] and "status" in cmds
 
@@ -1021,13 +1022,13 @@ def test_tui_suggestions_group_crates_by_stage(tmp_path):
     (tmp_path / "b" / "rust2rpm.toml").write_text("[tests]\n")
     (tmp_path / "b" / "rust-b-0.2.0-1.fc45.src.rpm").write_text("")
     out = rd.tui_suggestions(tmp_path)
-    assert [(c, cr, fl) for c, cr, fl, _ in out] == [
+    assert [(c, cr, fl) for c, cr, fl, _, _ in out] == [
         ("trial", ["a"], ["discover"]),
         ("review-plan", ["b"], []),
         ("status", [], []),
     ]
     # each suggestion names the stage it is an edge out of
-    assert [why.split(":")[0] for _, _, _, why in out] == ["tests?", "review",
+    assert [why.split(":")[0] for _, _, _, _, why in out] == ["tests?", "review",
                                                             "packaged vs. crates.io vs. the Fedora releases"]
 
 
@@ -1089,10 +1090,10 @@ def test_tui_suggested_actions_follows_what_the_tools_propose(tmp_path):
         "file the READY ones, in this order: rust-deps review-request --project u/p --fas NAME --file synta",
     ]
     acts = rd.tui_suggested_actions(plan, tmp_path, commands)
-    triples = [(c, cr, fl) for c, cr, fl, _ in acts]
+    triples = [(c, cr, fl) for c, cr, fl, _, _ in acts]
     # review-plan's own wording names the step and the package block picks the crate
     assert ("review", ["synta-derive"], []) in triples
-    assert next(why for c, _, _, why in acts if c == "review") == \
+    assert next(why for c, _, _, _, why in acts if c == "review") == \
         "no local fedora-review result; run 'review' first"
     # a full rust-deps line carries its own crates and flags; option values are skipped
     assert ("review-request", ["synta"], ["file"]) in triples
@@ -1103,7 +1104,7 @@ def test_tui_suggested_actions_follows_what_the_tools_propose(tmp_path):
         '   next: address the comments above: fix, regen, srpm, review, copr --wait, '
         'then \'review-request --file --comment "<what changed>"\'',
     ]
-    triples = [(c, cr, fl) for c, cr, fl, _ in rd.tui_suggested_actions(status, tmp_path, commands)]
+    triples = [(c, cr, fl) for c, cr, fl, _, _ in rd.tui_suggested_actions(status, tmp_path, commands)]
     assert ("review-request", ["synta"], ["file"]) in triples
 
     copr = [
@@ -1116,7 +1117,7 @@ def test_tui_suggested_actions_follows_what_the_tools_propose(tmp_path):
         "- resubmit what can succeed now:",
         "    rust-deps --root /r copr --retry-failed --project u/p synta-derive",
     ]
-    triples = [(c, cr, fl) for c, cr, fl, _ in rd.tui_suggested_actions(copr, tmp_path, commands)]
+    triples = [(c, cr, fl) for c, cr, fl, _, _ in rd.tui_suggested_actions(copr, tmp_path, commands)]
     assert ("copr", ["synta-derive"], ["retry_failed"]) in triples
 
     # prose that quotes non-commands suggests nothing
@@ -1129,7 +1130,121 @@ def test_tui_suggested_actions_follows_what_the_tools_propose(tmp_path):
     # a real proposal with a placeholder crate still jumps, just without crates
     footer = ["* = newer version on crates.io ('rust-deps update <crate>' to update)"]
     assert rd.tui_suggested_actions(footer, tmp_path, commands) == \
-        [("update", [], [], footer[0])]
+        [("update", [], [], {}, footer[0])]
+
+
+def test_tui_suggested_actions_captures_literal_option_values(tmp_path):
+    make_package(tmp_path, "synta-derive", "rust-synta-derive", "0.4.0")
+    commands = _tui_commands()
+    lines = [
+        "=== stage 1",
+        "synta-derive 0.4.0-1.fc46: build 4488123",
+        "   RETRY    fedora-rawhide-x86_64",
+        "",
+        "summary: 1 retry",
+        "- resubmit what can succeed now:",
+        "    rust-deps --root /r copr --retry-failed --project u/p -r fedora-44-x86_64 synta-derive",
+    ]
+    acts = rd.tui_suggested_actions(lines, tmp_path, commands)
+    copr = next(a for a in acts if a[0] == "copr")
+    assert copr[1] == ["synta-derive"] and "retry_failed" in copr[2]
+    assert copr[3] == {"project": "u/p", "chroot": "fedora-44-x86_64"}
+    # metavar placeholders (P, NAME) are not values; repeatable options accumulate
+    plan = ["file the READY ones: rust-deps review-request --project P --fas NAME --file synta-derive"]
+    rr = rd.tui_suggested_actions(plan, tmp_path, commands)[0]
+    assert rr[:4] == ("review-request", ["synta-derive"], ["file"], {})
+    two = ["    rust-deps copr --project u/p -r fedora-44-x86_64 -r epel-10-x86_64 synta-derive"]
+    assert rd.tui_suggested_actions(two, tmp_path, commands)[0][3] == {
+        "project": "u/p", "chroot": "fedora-44-x86_64 epel-10-x86_64"}
+
+
+def test_tui_suggested_actions_maps_a_single_positional_crate(tmp_path):
+    make_package(tmp_path, "synta", "rust-synta", "0.4.0")
+    commands = _tui_commands()
+    lines = [
+        "=== stage 1",
+        "synta 0.4.0-1.fc46: build 1",
+        "   FAILED   fedora-44-x86_64",
+        "- build errors: read the summary:",
+        "    rust-deps --root /r copr-log synta -r fedora-44-x86_64 --project u/p",
+    ]
+    acts = rd.tui_suggested_actions(lines, tmp_path, commands)
+    log = next(a for a in acts if a[0] == "copr-log")
+    # 'copr-log' takes one crate as a positional: it arrives as a form value, not a picker
+    assert log[1] == []
+    assert log[3] == {"chroot": "fedora-44-x86_64", "project": "u/p", "crate": "synta"}
+
+
+def test_tui_playbooks_cover_every_command():
+    parsers = _subcommand_parsers()
+    assert set(rd.TUI_PLAYBOOKS) == set(parsers) - {"tui"}
+    for name, pb in rd.TUI_PLAYBOOKS.items():
+        if pb.result:
+            assert pb.result in rd.TUI_RESULT_RENDERERS, name
+        # only tools 'doctor' actually reports can gate the sidebar
+        for tool in pb.requires:
+            assert tool in rd.OPTIONAL_TOOLS, name
+
+
+def test_parse_copr_status_output_reads_the_ladder():
+    rows = rd.parse_copr_status_output([
+        "=== stage 1",
+        "synta-derive 0.4.0-1.fc46: build 4488123",
+        "   RETRY    fedora-rawhide-x86_64",
+        "            rust-bar-devel: nothing provides it",
+        "   ok       fedora-44-x86_64  fedora-45-x86_64  (build https://copr.fedorainfracloud.org/coprs/build/4488000/)",
+        "native-ossl 0.1.0-1.fc46: no COPR build of this version",
+        "=== stage 2",
+        "synta 0.4.0-1.fc46: build 4488200",
+        "   BLOCKED  fedora-rawhide-x86_64",
+        "",
+        "summary: 1 ok, 1 retry, 1 blocked",
+        "- resubmit what can succeed now:",
+        "    rust-deps --root /r copr --retry-failed --project u/p synta-derive",
+    ])
+    assert [(r["stage"], r["crate"], r["verdict"], r["chroots"]) for r in rows] == [
+        (1, "synta-derive", "RETRY", "fedora-rawhide-x86_64"),
+        (1, "synta-derive", "ok", "fedora-44-x86_64 fedora-45-x86_64"),
+        (1, "native-ossl", "none", ""),
+        (2, "synta", "BLOCKED", "fedora-rawhide-x86_64"),
+    ]
+    assert rd.parse_copr_status_output(["nothing here"]) == []
+
+
+def test_tui_app_jumps_prefill_option_values(tmp_path):
+    pytest.importorskip("textual")
+    from textual.widgets import Input
+    app_class = rd.make_tui_app()
+    make_package(tmp_path, "synta", "rust-synta", "0.4.0")
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(140, 45)) as pilot:
+            await pilot.pause()
+            # a jump with option values opens the form prefilled, including the
+            # single positional crate of 'copr-log'
+            app._show("copr-log", values={"chroot": "fedora-44-x86_64",
+                                          "project": "u/p", "crate": "synta"})
+            await app._rebuild.wait()
+            await pilot.pause()
+            assert app._argv() == ["synta", "--chroot", "fedora-44-x86_64", "--project", "u/p",
+                                   "--errors", "15"]  # the CLI default stays visible
+            # carry-over: the playbook keeps what the previous run established
+            app._last_form_values = {"project": "u/p", "chroot": "fedora-44-x86_64"}
+            app._show("copr")
+            await app._rebuild.wait()
+            await pilot.pause()
+            argv = app._argv()
+            assert "--project" in argv and "u/p" in argv
+            assert "fedora-44-x86_64" in argv  # the repeatable -r arrives as a filled row
+            # a new crate named by a jump arrives in the 'other crates' field
+            app._last_form_values = {}
+            app._show("init", prefill=["serde", "jsonschema"])
+            await app._rebuild.wait()
+            await pilot.pause()
+            assert app._argv() == ["jsonschema", "serde"]  # sorted, deterministic
+
+    asyncio.run(drive())
 
 
 def test_parse_columns_table_ignores_free_form_output():
@@ -1280,7 +1395,7 @@ def test_tui_app_overview_jumps_with_crates_picked(tmp_path):
             assert app.query_one("#screens", ContentSwitcher).current == "overview"
             assert app.query_one("#pkg-table", DataTable).row_count == 1
             # a package without [tests] is suggested exactly the next edge: trial
-            assert [c for c, _, _, _ in app._suggestions] == ["trial"]
+            assert [c for c, _, _, _, _ in app._suggestions] == ["trial"]
             suggestions = app.query_one("#suggestions", OptionList)
             app.on_option_list_option_selected(
                 OptionList.OptionSelected(suggestions, suggestions.get_option_at_index(0), 0))
@@ -1322,7 +1437,7 @@ def test_tui_app_trial_results_drive_next_steps(tmp_path):
             assert app.query_one("#result-table", DataTable).row_count == 1
             assert app.query_one("#tabs").active == "table"
             # the suggested [tests] table becomes an apply-and-recheck next step
-            assert [(c, cr, fl) for c, cr, fl, _ in app._result_actions] == [
+            assert [(c, cr, fl) for c, cr, fl, _, _ in app._result_actions] == [
                 ("trial", ["synta"], ["discover", "apply"])]
             acts = app.query_one("#result-actions", OptionList)
             app.on_option_list_option_selected(
@@ -1420,7 +1535,7 @@ def test_tui_app_tool_proposed_steps_become_jumps(tmp_path):
             app._render_structured()
             await pilot.pause()
             # review-plan's own proposal becomes a jump even without a table
-            assert [(c, cr, fl) for c, cr, fl, _ in app._result_actions] == [
+            assert [(c, cr, fl) for c, cr, fl, _, _ in app._result_actions] == [
                 ("review", ["synta-derive"], [])]
             assert app.query_one("#tabs").active == "table"
             assert app.query_one("#result-table").row_count == 0
