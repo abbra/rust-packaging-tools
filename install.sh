@@ -56,14 +56,6 @@ if [[ ${#targets[@]} -eq 0 && -z "$zip" && -z "$bin" ]]; then
     targets=("$HOME/.claude/skills")
 fi
 
-# ── sanity checks on the skill itself ────────────────────────────────────────
-[[ -f "$SRC/SKILL.md" ]] || die "$SRC/SKILL.md not found"
-grep -q "^name: $NAME\$" "$SRC/SKILL.md" || die "SKILL.md 'name:' must be $NAME (the directory name)"
-python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$SRC/scripts/rust-deps" \
-    || die "scripts/rust-deps has a syntax error"
-find "$SRC" -name __pycache__ -type d -prune -exec rm -rf {} +
-chmod +x "$SRC/scripts/rust-deps"
-
 is_ours() {  # is $1 an installed copy/link of this skill?
     # a live copy or link must carry this skill's SKILL.md; only a dangling
     # link, which is what --link leaves when the checkout moves, counts as ours
@@ -90,8 +82,16 @@ if [[ $uninstall == 1 ]]; then
 fi
 
 # ── install ──────────────────────────────────────────────────────────────────
+# sanity checks on the skill itself: only for the operations that read the tree
+[[ -f "$SRC/SKILL.md" ]] || die "$SRC/SKILL.md not found"
+grep -q "^name: $NAME\$" "$SRC/SKILL.md" || die "SKILL.md 'name:' must be $NAME (the directory name)"
+python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$SRC/scripts/rust-deps" \
+    || die "scripts/rust-deps has a syntax error"
+find "$SRC" -name __pycache__ -type d -prune -exec rm -rf {} +
+chmod +x "$SRC/scripts/rust-deps"
+
 first=""
-for t in "${targets[@]}"; do
+for t in ${targets[@]+"${targets[@]}"}; do
     dest="$t/$NAME"
     mkdir -p "$t"
     if [[ -e "$dest" || -L "$dest" ]]; then
