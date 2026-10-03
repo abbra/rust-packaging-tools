@@ -5,7 +5,9 @@ rust-deps is a script without a .py suffix; load it as a module.
 
 import importlib.machinery
 import importlib.util
+import json
 import sys
+import urllib.error
 import tomllib
 from pathlib import Path
 
@@ -691,3 +693,51 @@ def test_prepare_update_uses_the_adopted_branch(tmp_path, monkeypatch):
     assert actions == []
     assert not (d / rd.UPDATE_STATE).exists()
     assert sh("git", "rev-parse", "HEAD", cwd=top / "rust-zmij") == adopted
+
+
+# ─── CLI wiring ──────────────────────────────────────────────────────────────
+
+def run_cli(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["rust-deps", *argv])
+    rd.main()
+
+
+def test_cli_help_exits_zero(monkeypatch):
+    with pytest.raises(SystemExit) as e:
+        run_cli(monkeypatch, "--help")
+    assert e.value.code == 0
+
+
+def test_cli_rejects_an_unknown_command(monkeypatch):
+    with pytest.raises(SystemExit) as e:
+        run_cli(monkeypatch, "frobnicate")
+    assert e.value.code == 2
+
+
+def test_cli_refuses_a_missing_root(tmp_path, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as e:
+        run_cli(monkeypatch, "--root", str(tmp_path / "nope"), "status")
+    err = capsys.readouterr().err
+    assert "is not a directory" in err and "Traceback" not in err
+    assert e.value.code == 1
+
+
+def test_cli_order_json(tmp_path, monkeypatch, capsys):
+    make_package(tmp_path, "a", "rust-a")
+    make_package(tmp_path, "b", "rust-b")
+    stub_buildrequires(monkeypatch, {"b": ["crate(a) >= 0.1"]})
+    run_cli(monkeypatch, "--root", str(tmp_path), "order", "--all", "--json")
+    assert json.loads(capsys.readouterr().out) == [["a"], ["b"]]
+
+
+def test_cli_reports_network_failure(tmp_path, monkeypatch, capsys):
+    make_package(tmp_path, "a", "rust-a")
+    monkeypatch.setattr(rd, "fedora_index", lambda refresh=False, chroot=None: rd.FedoraIndex({}))
+    def boom(name):
+        raise urllib.error.URLError("no route to host")
+    monkeypatch.setattr(rd, "crate_versions", boom)
+    with pytest.raises(SystemExit) as e:
+        run_cli(monkeypatch, "--root", str(tmp_path), "status")
+    err = capsys.readouterr().err
+    assert "network request failed" in err and "Traceback" not in err
+    assert e.value.code == 1
