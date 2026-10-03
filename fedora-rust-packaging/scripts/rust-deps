@@ -4138,8 +4138,9 @@ def cmd_doctor(args) -> None:
 # widget (crate picker, mode choice for exclusive groups, rows for repeatable
 # options, Run gated on required arguments).  Each command runs as a
 # 'rust-deps' subprocess whose output streams into the view: block headers and
-# verdict words are colored, and 'status', 'doctor' and any '--json' result are
-# additionally rendered as a table.  The Textual APIs used here exist unchanged
+# verdict words are colored, and 'status', 'doctor', 'trial', 'srpm' and any
+# '--json' result are additionally rendered as tables.  The Textual APIs used
+# here exist unchanged
 # in Textual 4 (Fedora 44) and Textual 8.
 
 TUI_SECTIONS = [
@@ -4435,6 +4436,43 @@ def tui_trial_actions(rows: list[dict]) -> list[tuple[str, list[str], list[str],
     return out
 
 
+_SRPM_HEADER_RE = re.compile(r"^== (\S+) (\S+)$")
+_SRPM_RPMLINT_RE = re.compile(r"checked; (.*)$")
+
+
+def parse_srpm_output(lines: list[str]) -> list[dict]:
+    """The 'srpm' blocks as rows: crate, version, srpm, %prep, rpmlint.
+
+    Each stage prints its result line only when it succeeds, so a missing line
+    marks where the run stopped (its error text is in the log); with --no-prep
+    the %prep line is absent, but a later line proves the run continued.
+    """
+    rows: list[dict] = []
+    cur: dict | None = None
+    for line in lines:
+        if m := _SRPM_HEADER_RE.match(line):
+            cur = {"crate": m.group(1), "version": m.group(2),
+                   "srpm": "", "prep": "", "rpmlint": ""}
+            rows.append(cur)
+            continue
+        if cur is None:
+            continue
+        s = line.strip()
+        if s.startswith("Wrote: "):
+            cur["srpm"] = s.removeprefix("Wrote: ").rsplit("/", 1)[-1]
+        elif s == "%prep ok":
+            cur["prep"] = "ok"
+        elif m := _SRPM_RPMLINT_RE.search(s):
+            cur["rpmlint"] = m.group(1)
+        elif s == "rpmlint: no output":
+            cur["rpmlint"] = "no output"
+    for r in rows:
+        r["srpm"] = r["srpm"] or "FAILED"
+        r["prep"] = r["prep"] or ("skipped" if r["rpmlint"] else "FAILED")
+        r["rpmlint"] = r["rpmlint"] or "FAILED"
+    return rows
+
+
 def tui_argv(fields: list[TuiField], values: dict) -> list[str]:
     """Turn form values into command-line arguments; empty fields are left out."""
     argv: list[str] = []
@@ -4716,6 +4754,8 @@ def make_tui_app() -> type:
                   flags: list[str] | None = None) -> None:
             self._cancel_proc()
             self._cmd = name
+            # the result views belong to the previous command: start from the log
+            self.query_one("#tabs", Tabs).active = "log"
             self._prefill = set(prefill or [])
             self._prefill_flags = set(flags or [])
             help_text, fields, controls = commands[name]
@@ -4935,6 +4975,9 @@ def make_tui_app() -> type:
             self._cmd_running = True
             self.query_one("#run", Button).disabled = True
             self.query_one("#cancel", Button).disabled = False
+            # the run streams into the Log view; _render_structured switches to
+            # the Table tab only if the output has a table shape
+            self.query_one("#tabs", Tabs).active = "log"
             log.write(Text("$ " + " ".join(shlex.quote(a) for a in argv), style="dim"))
             self.run_command(argv)
 
@@ -5014,11 +5057,19 @@ def make_tui_app() -> type:
                               [[r["crate"], r["version"], r["target"], r["status"],
                                 r["summary"], r["detail"]] for r in trial_rows])
                     actions = tui_trial_actions(trial_rows)
+            elif self._cmd == "srpm":
+                # like trial, srpm's per-crate stage lines are verdict-shaped
+                srpm_rows = parse_srpm_output(self._stdout)
+                if srpm_rows:
+                    parsed = (["crate", "version", "srpm", "%prep", "rpmlint"],
+                              [[r["crate"], r["version"], r["srpm"], r["prep"],
+                                r["rpmlint"]] for r in srpm_rows])
             self._result_actions = actions
             self._fill_actions(self.query_one("#result-actions", OptionList), actions)
             self.query_one("#result-actions-label", Label).update(
                 "next steps from this run (select to jump)" if actions else "")
-            if parsed is None:
+            if parsed is None:  # nothing table-shaped: the output is in the Log view
+                self.query_one("#tabs", Tabs).active = "log"
                 return
             headers, rows = parsed
             table = self.query_one("#result-table", DataTable)
