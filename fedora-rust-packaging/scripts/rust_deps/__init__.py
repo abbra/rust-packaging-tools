@@ -17,6 +17,9 @@ fedora-rust-packaging skill; 'rust-deps doctor' checks the prerequisites.
 The tool is split into components by command domain (see the module
 docstrings); the 'scripts/rust-deps' launcher next to this package runs it
 straight from a checkout, no installation needed.
+
+A Rust workspace is read from its own source tree: its member crates are not
+asked of crates.io ('rust-deps workspace <dir>').
 """
 
 from . import (
@@ -52,4 +55,5 @@ from . import (
     update,
     util,
     versions,
+    workspace,
 )
