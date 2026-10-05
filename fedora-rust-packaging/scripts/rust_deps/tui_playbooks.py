@@ -15,6 +15,7 @@ TUI_RESULT_RENDERERS = {
     "review-plan": tui_results.render_review_plan_output,
     "review-request": tui_results.render_review_request_output,
     "resolve": tui_results.render_resolve_output,
+    "workspace": tui_results.render_workspace_output,
     "update": tui_results.render_update_output,
     "order": tui_results.render_order_output,
 }
@@ -37,6 +38,7 @@ TUI_PLAYBOOKS = {
     "doctor": TuiPlaybook(result="doctor"),
     "status": TuiPlaybook(result="status", carry=("target",)),
     "resolve": TuiPlaybook(result="resolve"),
+    "workspace": TuiPlaybook(result="workspace"),
     "order": TuiPlaybook(result="order"),
     "check-targets": TuiPlaybook(carry=("chroot", "project")),
     "init": TuiPlaybook(carry=("target",)),

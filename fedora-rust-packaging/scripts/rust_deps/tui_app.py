@@ -40,7 +40,7 @@ from . import util
 
 TUI_SECTIONS = [
     ("Setup", ["doctor", "status"]),
-    ("Missing crates", ["resolve", "order", "check-targets"]),
+    ("Missing crates", ["resolve", "workspace", "order", "check-targets"]),
     ("Create", ["init", "regen", "update"]),
     ("Test", ["trial"]),
     ("Build", ["srpm", "mock-chain", "copr", "tmt"]),
@@ -57,6 +57,8 @@ _TUI_LINE_STYLES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^=+ "), "bold cyan"),  # '== package' and '=== stage' blocks
     (re.compile(r"^\$ "), "dim"),  # echoed tool commands
     (re.compile(r"^(NEW|UPDATE|FEATURES)(?=\s)"), "cyan"),  # resolve verdicts
+    (re.compile(r"^(SYSTEM|PACKAGED|WORKSPACE)(?=\s)"), "cyan"),  # where a workspace crate comes from
+    (re.compile(r"^(DROP|KEEP|OPTIONAL)(?=\s)"), "yellow"),  # the vendor audit
     (re.compile(r"^\s*(ok|root)(?=\s|$)"), "green"),
     (re.compile(r"^\s*(MISSING|FAILED)(?=\s|$)"), "bold red"),
     (re.compile(r"^\s*(BUILDING|WAIT|RETRY|BLOCKED|absent|WARNING)(?=\s|$)"), "yellow"),
@@ -635,6 +637,8 @@ def make_tui_app() -> type:
         async def _render_multi(self, form: Vertical, c: tui_form.TuiControl) -> None:
             """A repeatable option: rows of inputs with add/remove."""
             f = c.fields[0]
+            # a positional repeatable argument has no option string to name
+            again = f.options[0] if f.options else f.metavar
             hint = f.metavar + (" (required)" if f.required else "")
             if f.help:
                 hint += " — " + textwrap.shorten(f.help, width=110, placeholder=" …")
@@ -645,7 +649,7 @@ def make_tui_app() -> type:
                 Button(
                     "+",
                     id=self._wid(f"add-{f.key}"),
-                    tooltip=f"add another {f.options[0]}",
+                    tooltip=f"add another {again}",
                 ),
             )
             self._multi_rows[f.key] = []
@@ -686,7 +690,7 @@ def make_tui_app() -> type:
                     else:
                         widget = self._choice_inputs.get(f.group)
                         out[f.key] = widget.value if widget is not None else ""
-                elif f.kind == "multi" and not f.positional:
+                elif f.kind == "multi":  # repeatable option, or repeatable positional
                     out[f.key] = " ".join(
                         r.value.strip()
                         for r in self._multi_rows.get(f.key, [])

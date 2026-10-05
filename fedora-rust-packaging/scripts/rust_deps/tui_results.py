@@ -515,6 +515,57 @@ def render_resolve_output(lines: list[str], root: Path):
 _ORDER_STAGE_RE = re.compile(r"^stage (\d+): (.*)$")
 
 
+_WORKSPACE_ROW_RE = re.compile(
+    r"^(SYSTEM|PACKAGED|FEATURES|UPDATE|NEW|WORKSPACE|PATH|OPTIONAL)\s+"
+    r"(\S+)(?:\s+(?!req\b)(\S+))?(.*?)$"
+)
+
+
+def parse_workspace_output(lines: list[str]) -> list[dict]:
+    """'workspace' rows: every crate the project needs, and what provides it."""
+    rows: list[dict] = []
+    for line in lines:
+        if not (m := _WORKSPACE_ROW_RE.match(line)):
+            continue
+        asked, _, needed_by = (m.group(4) or "").partition(" <- ")
+        rows.append(
+            {
+                "status": m.group(1),
+                "crate": m.group(2),
+                "version": m.group(3) or "",
+                "asked": asked.strip().removeprefix("req").strip(),
+                "needed_by": needed_by.strip(),
+            }
+        )
+    return rows
+
+
+def render_workspace_output(lines: list[str], root: Path):
+    rows = parse_workspace_output(lines)
+    if not rows:
+        return None, []
+    parsed = (
+        ["status", "crate", "version", "asks for", "needed by"],
+        [
+            [r["status"], r["crate"], r["version"], r["asked"], r["needed_by"]]
+            for r in rows
+        ],
+    )
+    actions = []
+    missing = [r["crate"] for r in rows if r["status"] == "NEW"]
+    if missing:
+        actions.append(
+            (
+                "init",
+                missing,
+                ["recursive"],
+                {},
+                "Fedora has none of these: init --recursive packages them for the project",
+            )
+        )
+    return parsed, actions
+
+
 def render_order_output(lines: list[str], root: Path):
     """'order' prints one 'stage N: crates' line per build stage: show the ladder."""
     rows = [
