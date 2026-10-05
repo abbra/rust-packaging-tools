@@ -2,9 +2,9 @@
 name: fedora-rust-packaging
 description: Package Rust crates for Fedora with rust2rpm, including every dependency crate missing from Fedora. Use when asked to package a crate (or a project's missing Rust dependencies) as RPMs, to create or update rust-<crate> specs, to fix a rust2rpm Cargo.toml patch or test selection, or to build such packages in mock or COPR in dependency order.
 compatibility: Fedora (or a Fedora-like system with dnf5) with python3, rust2rpm, cargo, rpm-build, rpmdevtools, rpmlint, patch, util-linux and iproute; network access to crates.io. mock, fedora-review and copr-cli are optional, for builds and reviews.
-argument-hint: "<crate>[@ver]… | --manifest <Cargo.toml> | <rust-deps command> [args] [--root <dir>]"
+argument-hint: "<crate>[@ver]… | --manifest <Cargo.toml> | workspace <dir> | <rust-deps command> [args] [--root <dir>]"
 metadata:
-  version: "1.17"
+  version: "1.18"
 ---
 
 # Fedora Rust crate packaging
@@ -41,6 +41,10 @@ Read them as follows (forms can be combined with `--root <dir>`):
   package them and every missing dependency (the whole workflow below).
 - **`--manifest <path/Cargo.toml>`**, or a path to a project directory or its
   `Cargo.toml`: package the project's dependencies that Fedora is missing.
+- **a Rust workspace** (`workspace <dir>`, or the user's own workspace
+  repository): audit it — its member crates, and where every crate the members
+  ask for comes from. Fedora ships some of them: those must not be vendored
+  ("Rust workspaces" in `references/MANUAL.md`).
 - **a `rust-deps` command** with its arguments (`status`, `resolve …`,
   `trial <crate>`, `srpm --all`, `review --all -r <chroot>`,
   `check-targets --all --project <owner/project>`,
@@ -109,6 +113,10 @@ Read them as follows (forms can be combined with `--root <dir>`):
 1. **Scope:** `$T resolve <crate>…` or `$T resolve --manifest <path/Cargo.toml>`.
    Use `--json` for machine-readable output. Note NEW, UPDATE and FEATURES
    entries.
+   For a Rust workspace — a repository of crates that are not published on
+   crates.io — `$T workspace <dir>` instead: it lists the members and says
+   where each crate the members ask for comes from. Take what Fedora ships
+   from the packages; never vendor it. Package the NEW ones.
 2. **Create:** `$T init --recursive <crate>…`. It prints `ACTION NEEDED:` lines
    on stderr, and a `Suggested [tests] table` for each package.
 3. **For each package**, until `regen` prints no `ACTION NEEDED`:
