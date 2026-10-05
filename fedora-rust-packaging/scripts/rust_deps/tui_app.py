@@ -76,6 +76,16 @@ def tui_line_style(line: str) -> str:
     return ""
 
 
+# The height, in terminal rows, of one repeatable-argument row (an Input with its
+# tall border).  '#form' is capped so a long form scrolls, and Textual shrinks any
+# container whose height is 'auto' to whatever space is left: a row or the holder
+# of rows would collapse to zero rows while the Buttons beside them keep their
+# three.  Every widget a form mounts therefore states a height, and a row holder
+# is sized from its row count (see _set_rows_height).  The matching CSS rules are
+# in RustDepsTUI.CSS.
+FORM_ROW_HEIGHT = 3
+
+
 def make_tui_app() -> type:
     """The Textual app class.  Imports textual, so only 'tui' needs it."""
     import shlex
@@ -133,11 +143,17 @@ def make_tui_app() -> type:
             #cmd-help { height: auto; max-height: 3; padding: 0 1; }
             #form { height: auto; max-height: 16; }
             #form-crates, #form-options { width: 1fr; padding: 0 1; overflow-y: auto; }
-            #form .field-label { color: $text-muted; }
-            #form Input { width: 100%; }
-            #form Select { width: 100%; }
-            #form Horizontal { width: 100%; }
-            #form Horizontal Input { width: 1fr; }
+            #form .field-label { color: $text-muted; height: 1; }
+            #form Input { width: 100%; height: 3; }
+            #form Select { width: 100%; height: 3; }
+            #form Checkbox { height: 1; }
+            #form .multi-head { width: 100%; height: 1; }
+            #form .multi-head Label { width: 1fr; }
+            #form .multi-add { width: 3; min-width: 3; height: 1; padding: 0 1; border: none; }
+            #form .multi-rows { width: 100%; }
+            #form .multi-row { width: 100%; height: 3; }
+            #form .multi-row Input { width: 1fr; }
+            #form .multi-remove { width: 3; min-width: 3; }
             #runbar { padding: 0 1; }
             #preview { width: 1fr; }
             #view { height: 1fr; }
@@ -149,7 +165,7 @@ def make_tui_app() -> type:
             #tests-edit .field-label { color: $text-muted; }
             #tests-edit-table { height: auto; max-height: 12; }
             #tests-edit-rows { height: auto; max-height: 14; overflow-y: auto; }
-            #tests-edit-rows Input { width: 100%; }
+            #tests-edit-rows Input { width: 100%; height: 3; }
             #tests-actions { height: auto; max-height: 8; }
         """
         BINDINGS = [
@@ -642,22 +658,32 @@ def make_tui_app() -> type:
             hint = f.metavar + (" (required)" if f.required else "")
             if f.help:
                 hint += " — " + textwrap.shorten(f.help, width=110, placeholder=" …")
-            holder = Vertical(id=self._wid(f"m-{f.key}"))
-            await form.mount(
-                Label(f"{f.label} (repeatable)", classes="field-label"),
-                holder,
-                Button(
-                    "+",
-                    id=self._wid(f"add-{f.key}"),
-                    tooltip=f"add another {again}",
-                ),
-            )
+            # the label and its '+' share one row: a Button on a row of its own is
+            # three tall and lands on top of the inputs below it
+            holder = Vertical(id=self._wid(f"m-{f.key}"), classes="multi-rows")
             self._multi_rows[f.key] = []
             self._multi_next[f.key] = 0
+            add = Button(
+                "+",
+                id=self._wid(f"add-{f.key}"),
+                classes="multi-add",
+                tooltip=f"add another {again}",
+            )
+            # the row itself is what a keyboard user wants to reach first; the '+'
+            # is a mouse affordance and would otherwise be the first Tab stop
+            add.can_focus = False
+            await form.mount(
+                Horizontal(
+                    Label(f"{f.label} (repeatable)", classes="field-label"),
+                    add,
+                    classes="multi-head",
+                ),
+                holder,
+            )
             for v in self._prefill_values.get(f.key, "").split() or [""]:
-                self._add_multi_row(holder, f, hint, v)
+                await self._add_multi_row(holder, f, hint, v)
 
-        def _add_multi_row(
+        async def _add_multi_row(
             self, holder: Vertical, f: tui_form.TuiField, hint: str, value: str = ""
         ):
             n = self._multi_next[f.key]
@@ -665,11 +691,26 @@ def make_tui_app() -> type:
             widget = Input(
                 value=value, placeholder=hint, id=self._wid(f"f-{f.key}-{n}")
             )
-            holder.mount(
-                Horizontal(widget, Button("–", id=self._wid(f"rm-{f.key}-{n}")))
+            await holder.mount(
+                Horizontal(
+                    widget,
+                    Button("–", id=self._wid(f"rm-{f.key}-{n}"), classes="multi-remove"),
+                    classes="multi-row",
+                )
             )
             self._multi_rows[f.key].append(widget)
+            self._set_rows_height(f.key)
             return widget
+
+        def _rows_holder(self, key: str) -> Vertical:
+            return self.query_one(f"#{self._wid(f'm-{key}')}", Vertical)
+
+        def _set_rows_height(self, key: str) -> None:
+            """Size a row holder by its rows: an 'auto' holder is squeezed to nothing
+            by the capped form, which is what hid the inputs behind the buttons."""
+            self._rows_holder(key).styles.height = str(
+                len(self._multi_rows.get(key, [])) * FORM_ROW_HEIGHT
+            )
 
         def _values(self) -> dict:
             out = {}
@@ -745,9 +786,14 @@ def make_tui_app() -> type:
                     )
                     await holder.mount(widget)
                     self._choice_inputs[gi] = widget
+                    holder.styles.height = str(FORM_ROW_HEIGHT)
+                else:
+                    holder.styles.height = "0"
+            else:
+                holder.styles.height = "0"
             self._update_preview()
 
-        def on_button_pressed(self, event: Button.Pressed) -> None:
+        async def on_button_pressed(self, event: Button.Pressed) -> None:
             bid = event.button.id or ""
             if bid == "run":
                 self.action_run_command()
@@ -761,8 +807,8 @@ def make_tui_app() -> type:
             elif "-add-" in bid:
                 key = bid.partition("-add-")[2]
                 f = next(m for m in self._fields if m.key == key)
-                widget = self._add_multi_row(
-                    self.query_one(f"#{self._wid(f'm-{key}')}", Vertical), f, f.metavar
+                widget = await self._add_multi_row(
+                    self._rows_holder(key), f, f.metavar
                 )
                 widget.focus()
                 self._update_preview()
@@ -771,8 +817,9 @@ def make_tui_app() -> type:
                 rows = self._multi_rows.get(key) or []
                 if len(rows) > 1:
                     widget = next(r for r in rows if r.id == self._wid(f"f-{key}-{n}"))
-                    widget.parent.remove()
+                    await widget.parent.remove()
                     rows.remove(widget)
+                    self._set_rows_height(key)
                     self._update_preview()
 
         def action_run_command(self) -> None:
