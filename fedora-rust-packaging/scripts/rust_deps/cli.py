@@ -33,6 +33,7 @@ from . import trial
 from . import tui_app
 from . import update
 from . import util
+from . import workspace
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,6 +92,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--refresh", action="store_true", help="refresh the cached Fedora crate list"
     )
     sp.set_defaults(func=resolver.cmd_resolve)
+
+    sp = sub.add_parser(
+        "workspace",
+        help="what a Rust workspace needs, and which of it Fedora already ships",
+    )
+    sp.add_argument(
+        "projects",
+        nargs="+",
+        metavar="DIR|Cargo.toml",
+        help="a workspace directory, or any Cargo.toml in it",
+    )
+    sp.add_argument(
+        "--local-root",
+        action="append",
+        metavar="DIR",
+        help="another package tree whose packages count as available (repeatable)",
+    )
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument(
+        "-r",
+        "--chroot",
+        dest="target",
+        metavar="CHROOT",
+        help="check against the crate repositories of this COPR/mock chroot "
+        "(e.g. fedora-44-x86_64, rhel+epel-10-x86_64) instead of the host's",
+    )
+    sp.add_argument(
+        "--refresh", action="store_true", help="refresh the cached Fedora crate list"
+    )
+    sp.set_defaults(func=workspace.cmd_workspace)
 
     sp = sub.add_parser(
         "init", help="create package directories, config, edits, spec; then trial"
