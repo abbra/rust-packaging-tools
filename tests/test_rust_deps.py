@@ -391,6 +391,187 @@ def test_resolve_counts_a_matching_local_package(tmp_path, monkeypatch):
     assert set(needed) == {"top@2.0.0"}  # mid is covered by the local package
 
 
+# ─── Rust workspaces ────────────────────────────────────────────────────────
+
+def manifest_dep(name: str, req: str = "*", path: str | None = None,
+                 kind: str | None = None, optional: bool = False) -> dict:
+    """A dependency as 'cargo metadata' shapes it."""
+    return {"name": name, "req": req, "path": path, "kind": kind, "optional": optional,
+            "features": [], "default_features": True, "uses_default_features": True,
+            "target": None, "registry": None if path else "https://github.com/rust-lang/crates.io-index"}
+
+
+def workspace_fixture(root: Path, members: dict[str, list[dict]],
+                      features: dict[str, dict] | None = None) -> dict:
+    """A workspace on disk plus the 'cargo metadata --no-deps' output describing it."""
+    (root / "Cargo.toml").write_text('[workspace]\nresolver = "2"\nmembers = ["crates/*"]\n')
+    packages, ids = [], []
+    for crate, deps in members.items():
+        manifest = root / "crates" / crate / "Cargo.toml"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(f'[package]\nname = "{crate}"\nversion = "1.0.0"\n')
+        pid = f"path+file://{manifest}#{crate}"
+        ids.append(pid)
+        packages.append({"id": pid, "name": crate, "version": "1.0.0",
+                         "manifest_path": str(manifest),
+                         "features": (features or {}).get(crate, {}),
+                         "dependencies": deps})
+    return {"workspace_members": ids, "packages": packages}
+
+
+def test_read_metadata_keeps_workspace_members_out_of_crates_io(tmp_path):
+    helper = tmp_path / "crates/helper"
+    meta = workspace_fixture(tmp_path, {
+        "core": [manifest_dep("serde", "^1.0"),
+                 manifest_dep("helper", "^1.0.0", path=str(helper)),  # a sibling with a version
+                 manifest_dep("tempfile", "^3", kind="dev")],
+        "helper": [],
+    })
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    assert [m.crate for m in man.members] == ["core", "helper"]
+    # the root manifest is the whole project
+    assert [m.crate for m in man.scope] == ["core", "helper"]
+    # helper is provided by the source tree; it is never asked of crates.io
+    assert [s[0] for s in man.seeds] == ["serde", "tempfile"]
+    assert [(r.crate, r.source) for r in man.requirements if r.crate == "helper"] == [("helper", "workspace")]
+
+
+def test_read_metadata_scopes_to_the_member_that_was_asked_for(tmp_path):
+    meta = workspace_fixture(tmp_path, {
+        "core": [manifest_dep("serde", "^1.0")],
+        "tool": [manifest_dep("clap", "^4.5")],
+    })
+    man = rd.resolver.read_metadata(meta, tmp_path / "crates/tool/Cargo.toml")
+    assert [m.crate for m in man.members] == ["core", "tool"]  # the workspace is still known
+    assert [m.crate for m in man.scope] == ["tool"]
+    assert {r.required_by for r in man.requirements} == {"tool"}
+    assert [s[0] for s in man.seeds] == ["clap"]
+
+
+def test_read_metadata_defers_optional_dependencies_no_feature_enables(tmp_path):
+    meta = workspace_fixture(tmp_path, {"helper": [manifest_dep("libc", "^0.2", optional=True)]},
+                            features={"helper": {"default": [], "native": ["dep:libc"]}})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    assert man.seeds == []  # nothing the members build by default asks for libc
+    assert [(r.crate, r.enabled_by) for r in man.optional_requirements()] == [("libc", ["native"])]
+
+
+def test_read_metadata_keeps_optional_dependencies_a_default_enables(tmp_path):
+    meta = workspace_fixture(tmp_path, {"helper": [manifest_dep("libc", "^0.2", optional=True)]},
+                            features={"helper": {"default": ["libc"]}})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    assert [s[0] for s in man.seeds] == ["libc"]
+    assert man.optional_requirements() == []
+
+
+def test_read_metadata_reports_a_path_dependency_outside_the_workspace(tmp_path):
+    meta = workspace_fixture(tmp_path, {"core": [manifest_dep("other", path=str(tmp_path / "extra/other"))]})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    assert man.seeds == []
+    assert [(r.crate, r.source, r.path) for r in man.requirements] == [
+        ("other", "path", str(tmp_path / "extra/other"))]
+
+
+def test_workspace_root_finds_the_declaration(tmp_path):
+    member = tmp_path / "ws/crates/core/Cargo.toml"
+    member.parent.mkdir(parents=True)
+    member.write_text('[package]\nname = "core"\nversion = "0.1.0"\n')
+    (tmp_path / "ws/Cargo.toml").write_text('[workspace]\nmembers = ["crates/*"]\n')
+    assert rd.resolver.workspace_root(member) == tmp_path / "ws"
+    # [workspace.metadata] in a crate's own manifest is not a workspace declaration
+    plain = tmp_path / "plain/Cargo.toml"
+    plain.parent.mkdir()
+    plain.write_text('[package]\nname = "plain"\nversion = "0.1.0"\n\n[workspace.metadata.foo]\nbar = 1\n')
+    assert rd.resolver.workspace_root(plain) == plain.parent
+
+
+def test_manifest_file_accepts_a_project_directory(tmp_path, capsys):
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "x"\nversion = "0.1.0"\n')
+    assert rd.resolver.manifest_file(tmp_path) == tmp_path / "Cargo.toml"
+    with pytest.raises(SystemExit):
+        rd.resolver.manifest_file(tmp_path / "nowhere")
+    assert "no Cargo.toml" in capsys.readouterr().err
+
+
+def test_resolve_reports_what_fedora_and_the_tree_already_provide(tmp_path, monkeypatch):
+    stub_cratesio(monkeypatch, {"blake3": ["1.5.0"]}, {"blake3": []})
+    make_package(tmp_path, "packed", "rust-packed", "2.0.0")
+    fedora = rd.fedora.FedoraIndex({"serde": {"1.0.200": {""}}})
+    needed = rd.resolver.resolve(
+        [("serde", "^1.0", "(test)", ["default"]),
+         ("packed", "^2.0", "(test)", ["default"]),
+         ("blake3", "^1.5", "(test)", ["default"])],
+        fedora, rd.packages.local_packages(tmp_path), report_provided=True)
+    assert {n.crate: n.status for n in needed.values()} == {
+        "serde": "fedora", "packed": "local", "blake3": "new"}
+    assert needed["serde@1.0.200"].reqs == {"^1.0"}
+    # without the flag, resolve only reports what is missing
+    needed = rd.resolver.resolve([("serde", "^1.0", "(test)", ["default"])], fedora, {})
+    assert needed == {}
+
+
+def test_workspace_classifies_every_crate_the_members_ask_for(tmp_path, monkeypatch):
+    stub_cratesio(monkeypatch, {"blake3": ["1.5.0"], "tempfile": ["3.10.0"]}, {"blake3": [], "tempfile": []})
+    make_package(tmp_path, "packed", "rust-packed", "2.0.0")
+    fedora = rd.fedora.FedoraIndex({"serde": {"1.0.200": {""}}})
+    meta = workspace_fixture(tmp_path, {
+        "core": [manifest_dep("serde", "^1.0"),
+                 manifest_dep("packed", "^2.0"),
+                 manifest_dep("blake3", "^1.5"),
+                 manifest_dep("helper", "^1.0.0", path=str(tmp_path / "crates/helper")),
+                 manifest_dep("tempfile", "^3", kind="dev")],
+        "helper": [],
+    })
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    found = rd.workspace.classify(man, fedora, rd.packages.local_packages(tmp_path))
+    assert {i.crate: i.status for i in found} == {
+        "serde": "fedora", "packed": "local", "blake3": "new",
+        "helper": "workspace", "tempfile": "new"}
+    assert {i.crate: i.version for i in found}["helper"] == "1.0.0"  # the member's own version
+    assert any("tests" in n for i in found if i.crate == "tempfile" for n in i.notes)
+
+
+def test_vendored_crates_and_the_source_replacement(tmp_path):
+    for name, ver in [("serde", "1.0.200"), ("quux", "0.1.0")]:
+        d = tmp_path / "vendor" / f"{name}-{ver}"
+        d.mkdir(parents=True)
+        (d / "Cargo.toml").write_text(f'[package]\nname = "{name}"\nversion = "{ver}"\n')
+    (tmp_path / "vendor/not-a-crate").mkdir()
+    (tmp_path / ".cargo").mkdir()
+    (tmp_path / ".cargo/config.toml").write_text('[source.crates-io]\nreplace-with = "vendored-sources"\n')
+    assert rd.workspace.vendored_crates(tmp_path) == [("quux", "0.1.0"), ("serde", "1.0.200")]
+    assert rd.workspace.replaced_source(tmp_path) == "crates-io"  # crates-io is the replaced source
+    (tmp_path / ".cargo/config.toml").write_text('[build]\njobs = 4\n')
+    assert rd.workspace.replaced_source(tmp_path) is None
+    assert rd.workspace.vendored_crates(tmp_path / "nothing") == []
+
+
+def test_parse_workspace_output_rows():
+    rows = rd.tui_results.parse_workspace_output([
+        "SYSTEM    serde 1.0.229             req ^1.0                <- core",
+        "OPTIONAL  libc                      req ^0.2                <- helper",
+        "            core 1.0.0                crates/core/Cargo.toml",  # a member line
+        "SYSTEM: Fedora ships this version: the spec BuildRequires crate(<name>).",  # the legend
+        "DROP      serde 1.0.200             Fedora has 1.0.229",  # a vendor audit line
+    ])
+    assert [(r["status"], r["crate"], r["version"], r["asked"], r["needed_by"]) for r in rows] == [
+        ("SYSTEM", "serde", "1.0.229", "^1.0", "core"),
+        ("OPTIONAL", "libc", "", "^0.2", "helper"),
+    ]
+
+
+def test_render_workspace_output_offers_to_package_what_fedora_lacks(tmp_path):
+    table, actions = rd.tui_results.render_workspace_output(
+        ["NEW       blake3 1.5.0              req ^1.5                <- core",
+         "SYSTEM    serde 1.0.229             req ^1.0                <- core",
+         "UPDATE    clap 4.5.4                req ^4.5                <- tool"], tmp_path)
+    assert table[1] == [["NEW", "blake3", "1.5.0", "^1.5", "core"],
+                        ["SYSTEM", "serde", "1.0.229", "^1.0", "core"],
+                        ["UPDATE", "clap", "4.5.4", "^4.5", "tool"]]
+    # an UPDATE is a decision about Fedora's package, not a new package to create
+    assert [a[:4] for a in actions] == [("init", ["blake3"], ["recursive"], {})]
+
+
 def test_crate_versions_treats_404_as_no_such_crate(monkeypatch):
     def not_found(url, key, max_age):
         raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
@@ -1517,6 +1698,9 @@ def test_parse_json_table_shapes():
     ("=== stage 2", "bold cyan"),
     ("$ mock --chain ...", "dim"),
     ("NEW       serde 1.0.220  <- jsonschema", "cyan"),
+    ("SYSTEM    serde 1.0.229             req ^1.0                <- core", "cyan"),
+    ("WORKSPACE helper 1.0.0              req ^1.0.0              <- core", "cyan"),
+    ("DROP      serde 1.0.200             Fedora has 1.0.229", "yellow"),
     ("   MISSING  fedora-44", "bold red"),
     ("   ok       fedora-rawhide", "green"),
     ("   BUILDING fedora-44-x86_64", "yellow"),
@@ -1575,6 +1759,27 @@ def test_tui_app_lists_and_runs_commands(tmp_path, monkeypatch):
             assert app.query_one("#run").disabled
             app.query_one(f"#{app._wid('f-project')}", Input).value = "u/p"
             await pilot.pause()
+            assert not app.query_one("#run").disabled
+
+    asyncio.run(drive())
+
+
+def test_tui_app_renders_a_positional_repeatable_workspace_argument(tmp_path):
+    pytest.importorskip("textual")
+    from textual.widgets import Input
+    app_class = rd.tui_app.make_tui_app()
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._show("workspace")
+            await app._rebuild.wait()
+            # 'workspace' takes repeatable positional paths: rows of inputs, no option string
+            assert app.query_one("#run").disabled  # the argument is required
+            app.query_one(f"#{app._wid('f-projects-0')}", Input).value = str(tmp_path / "ws")
+            await pilot.pause()
+            assert app._argv() == [str(tmp_path / "ws")]
             assert not app.query_one("#run").disabled
 
     asyncio.run(drive())
