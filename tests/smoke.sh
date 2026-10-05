@@ -15,12 +15,13 @@ crate=${spec%@*}
 version=${spec#*@}
 here=$(cd "$(dirname "$0")/.." && pwd)
 root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/rust-deps-smoke.XXXXXX")
+ws=$(mktemp -d "${RUNNER_TEMP:-/tmp}/rust-deps-ws.XXXXXX")
 failed=1
 cleanup() {
     if ((failed)); then
         echo "smoke test failed; the generated tree is kept in $root" >&2
     else
-        rm -rf "$root"
+        rm -rf "$root" "$ws"
     fi
 }
 trap cleanup EXIT
@@ -35,6 +36,36 @@ step doctor
 
 step "resolve $crate"
 "${T[@]}" resolve "$crate@=$version"
+
+step "workspace (a two-crate workspace depending on $crate)"
+cat > "$ws/Cargo.toml" <<EOF
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+EOF
+mkdir -p "$ws/crates/app/src" "$ws/crates/helper/src"
+cat > "$ws/crates/app/Cargo.toml" <<EOF
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+helper = { path = "../helper", version = "0.1.0" }
+$crate = "=$version"
+EOF
+cat > "$ws/crates/helper/Cargo.toml" <<EOF
+[package]
+name = "helper"
+version = "0.1.0"
+EOF
+echo 'fn main() {}' > "$ws/crates/app/src/main.rs"
+echo 'pub fn f() {}' > "$ws/crates/helper/src/lib.rs"
+"${T[@]}" workspace "$ws" | tee "$root/workspace.out"
+grep -q "Workspace $ws (2 member crates" "$root/workspace.out"
+grep -q 'WORKSPACE helper 0.1.0' "$root/workspace.out"
+# the sibling crate is unpublished: it is never proposed for packaging
+grep -qE '^(NEW|UPDATE|FEATURES)[[:space:]]+helper ' "$root/workspace.out" && exit 1
+grep -qE "^(NEW|UPDATE|SYSTEM|PACKAGED|FEATURES)[[:space:]]+$crate " "$root/workspace.out" && exit 1
 
 step "init $crate (test discovery ran)"
 "${T[@]}" init --apply-tests "$crate@=$version" | tee "$root/init.out"
