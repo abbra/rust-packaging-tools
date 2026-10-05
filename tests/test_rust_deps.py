@@ -1785,6 +1785,97 @@ def test_tui_app_renders_a_positional_repeatable_workspace_argument(tmp_path):
     asyncio.run(drive())
 
 
+def test_tui_app_repeatable_rows_stay_visible_and_aligned(tmp_path):
+    """A capped form must not squeeze the repeatable-argument rows away.
+
+    Textual shrinks containers whose height is 'auto' to whatever space is left,
+    so a capped form used to collapse each row to a border with no content line
+    while the Buttons beside it kept their three rows and covered them.
+    """
+    pytest.importorskip("textual")
+    from textual.widgets import Button, ContentSwitcher, Input
+    from textual.containers import Horizontal
+    app_class = rd.tui_app.make_tui_app()
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app._show("workspace")
+            await app._rebuild.wait()
+            app.query_one("#screens", ContentSwitcher).current = "work"
+            await pilot.pause()
+
+            pane = app.query_one("#form-options")
+
+            def row_groups(node):
+                """The Horizontal rows of inputs this node holds."""
+                return [
+                    field.parent
+                    for field in node.query(Input)
+                    if isinstance(field.parent, Horizontal)
+                ]
+
+            rows = row_groups(pane)
+            assert rows, "the repeatable arguments render no input rows"
+            for row in rows:
+                field = row.query_one(Input)
+                remove = row.query_one(Button)
+                # the input has a content line, so what is typed is shown
+                assert field.content_region.height >= 1, "the input shows no text"
+                assert field.content_region.width >= 10
+                # the row keeps the height its widgets ask for
+                assert row.region.height == rd.tui_app.FORM_ROW_HEIGHT
+                # and its button sits on the same rows, not over them
+                assert field.region.y == remove.region.y == row.region.y
+                assert field.region.height == remove.region.height
+                # the group of rows states the height its rows need: nothing to squeeze
+                assert row.parent.region.height >= len(row.parent.children) * (
+                    rd.tui_app.FORM_ROW_HEIGHT
+                )
+            # nothing else in the pane shares rows with an input row
+            groups = [w for w in pane.children if row_groups(w)]
+            occupied = sorted(
+                (r.region.y, r.region.y + r.region.height)
+                for w in groups
+                for r in row_groups(w)
+            )
+            for widget in pane.children:
+                if widget in groups:
+                    continue
+                span = (widget.region.y, widget.region.y + widget.region.height)
+                assert all(top >= span[1] or bottom <= span[0] for top, bottom in occupied), (
+                    f"{type(widget).__name__} overlaps an input row"
+                )
+
+            # typing lands in the row and reaches the preview
+            field = app.query("#form-options Input").first()
+            app.set_focus(field)
+            await pilot.press(*str(tmp_path / "ws"))
+            assert field.value == str(tmp_path / "ws")
+            assert str(tmp_path / "ws") in app._argv()
+
+            # '+' adds a row the same shape as the first; '–' takes it away again
+            await pilot.click(f"#{app._wid('add-projects')}")
+            await pilot.pause()
+            holder = rows[0].parent
+            added = [
+                f.parent
+                for f in holder.query(Input)
+                if isinstance(f.parent, Horizontal)
+            ]
+            assert len(added) == 2
+            assert holder.region.height == 2 * rd.tui_app.FORM_ROW_HEIGHT
+            second = holder.query(Input).last()
+            assert second.content_region.height >= 1, "the added input shows no text"
+            await pilot.click(f"#{app._wid('rm-projects-0')}")
+            await pilot.pause()
+            assert len(holder.query(Input)) == 1
+            assert holder.region.height == rd.tui_app.FORM_ROW_HEIGHT
+
+    asyncio.run(drive())
+
+
 def test_tui_app_form_splits_crates_and_options_into_panes(tmp_path):
     pytest.importorskip("textual")
     from textual.widgets import Checkbox, ContentSwitcher
