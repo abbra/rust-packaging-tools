@@ -86,6 +86,8 @@ interface) that offline trials need.
 ```
 export RUST_DEPS_ROOT=~/src/packages
 rust-deps resolve jsonschema                   # what is missing in Fedora?
+rust-deps workspace ~/src/myproject            # a Rust workspace: what it needs, and where from;
+                                             # what Fedora ships must not be vendored
 rust-deps init --recursive jsonschema          # create all missing packages
 rust-deps trial --discover --apply jsonschema  # pick tests that can run
 rust-deps srpm --all && rust-deps mock-chain --all -r fedora-45-x86_64
@@ -162,7 +164,7 @@ python3 -m pytest tests          # unit tests: offline, need python3-pytest, pyt
                                  # and rust2rpm (for its cargo2rpm module)
 tests/smoke.sh [crate@version]   # end to end on a crate from crates.io (default num-cmp@0.1.0):
                                  # doctor, resolve, init, regen, trial, srpm, order,
-                                 # check-targets, copr -n, status; needs network
+                                 # workspace, check-targets, copr -n, status; needs network
 ```
 
 GitHub Actions runs both in a Fedora container on every push and pull request

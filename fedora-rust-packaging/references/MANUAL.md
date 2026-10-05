@@ -83,6 +83,7 @@ $T doctor
 $T resolve jsonschema serde_json_path
 $T resolve --manifest ~/src/bac-rules/crates/authz-details-rs/Cargo.toml \
     --local-root ~/src/bac-rules/crates      # its sibling crates are packaged there
+$T workspace ~/src/myproject                  # a Rust workspace: what it needs, and where from
 
 # 2. Create packages for everything that is missing.  For each crate this
 #    downloads it, drafts cargo-toml-edits.toml and rust2rpm.toml,
@@ -171,7 +172,8 @@ graph at `regen`.
 
 | command | purpose |
 |---|---|
-| `resolve CRATE[@REQ]… [--manifest Cargo.toml] [--local-root DIR]… [-r CHROOT] [--json]` | Recursively list crates to package. **NEW** = not in Fedora. **UPDATE** = Fedora has other versions. **FEATURES** = Fedora's package lacks a requested feature. Also lists optional and dev dependencies that Fedora lacks. With `-r CHROOT`, checks against that COPR/mock target's crates (e.g. `fedora-44-x86_64`, `rhel+epel-10-x86_64`) instead of the host's. |
+| `resolve CRATE[@REQ]… [--manifest Cargo.toml] [--local-root DIR]… [-r CHROOT] [--json]` | Recursively list crates to package. **NEW** = not in Fedora. **UPDATE** = Fedora has other versions. **FEATURES** = Fedora's package lacks a requested feature. Also lists optional and dev dependencies that Fedora lacks. With `-r CHROOT`, checks against that COPR/mock target's crates (e.g. `fedora-44-x86_64`, `rhel+epel-10-x86_64`) instead of the host's. A `--manifest` in a Cargo workspace reads the workspace: its member crates are never proposed for packaging (see "Rust workspaces"). |
+| `workspace DIR\|Cargo.toml… [--local-root DIR]… [-r CHROOT] [--json]` | Read a Rust workspace with `cargo metadata`: list its member crates, and say where every crate the members ask for comes from — **SYSTEM** (Fedora ships it: use the package, do not vendor it), **PACKAGED**, **FEATURES**, **UPDATE**, **NEW**, **WORKSPACE** (a member; never asked of crates.io), **PATH** (a directory outside the workspace), **OPTIONAL** (only a feature the members do not enable asks for it). With a `vendor/` tree, audits it against Fedora's packages: what Fedora already ships is **DROP**, only what it lacks is **KEEP**. See "Rust workspaces". |
 | `init CRATE[@REQ]… [--recursive] [--force] [--no-trial] [--apply-tests] [-r CHROOT] [--compat]` | Create packages: drafts `cargo-toml-edits.toml`, `rust2rpm.toml` (patch comments, license sources) and the spec, then runs test discovery. Skips packages that already exist unless `--force` (which overwrites both files). `-r CHROOT` decides what is missing against that target, as for `resolve`, and limits a package the host's Fedora already ships to that target (`targets.toml`). `--compat` creates compat packages (see "Compat packages"). |
 | `regen CRATE…\|--all [--latest\|--version V\|--crate-file PATH] [--compat\|--no-compat]` | Regenerate spec and patches with rust2rpm, non-interactively. With `--latest` it updates the package to the newest release. With `--crate-file` (one crate only) it uses a local `.crate`, e.g. `cargo package` output of a version not yet on crates.io, and copies it into the package directory. `--compat` turns the package into a compat package, `--no-compat` back; otherwise a compat package stays one. The spec it replaces and its SRPMs are removed. |
 | `update CRATE…\|--all [--version V] [--no-trial] [-n] [-r CHROOT]` | Update packages to a new upstream release: to `--version V`, else the newest one (a compat package: the newest of its series). It asks crates.io anew, so a release of the last hour counts. It updates the packages in build order, moves the extra sources that `rust2rpm.toml` takes from upstream git (e.g. a license text) from the old release's commit to the new one's, regenerates, and runs `trial`. It reports edits the new version needs that `cargo-toml-edits.toml` lacks, edits that name what the new version no longer has, required dependencies Fedora lacks, a license text the new release now ships, and local packages whose crate does not accept the new version. `-n` only lists the updates. |
@@ -825,6 +827,47 @@ workspace members whose dependencies are not packaged (benchmarks, fuzzing) from
 build the SRPM with `rpmbuild -bs`, add it to the end of `mock --chain` with the
 same `--localrepo`, and submit it with `copr-cli build --after-build-id` of the
 last Rust stage.
+
+## Rust workspaces
+
+A workspace is one repository of several crates.  Its member crates are usually
+not published on crates.io, and packaging them is not what this command is for.
+`workspace` reads the project with `cargo metadata`, lists its members, and
+answers one question for every crate the members ask for: where it comes from.
+
+| | |
+|---|---|
+| `SYSTEM` | Fedora ships a matching version. The spec BuildRequires `crate(<name>)`. **Do not vendor it.** |
+| `PACKAGED` | already packaged in the packages root, or in a `--local-root` tree. |
+| `FEATURES` | Fedora's package lacks a feature the members ask for. |
+| `UPDATE` | Fedora ships another version: update it, make a compat package, or keep it vendored. |
+| `NEW` | not in Fedora: package it (`init --recursive`) or keep it vendored. |
+| `WORKSPACE` | a member of the workspace; the source tree provides it. It is never asked of crates.io, even when the requirement names a version (`helper = { path = "../helper", version = "1.0" }`, or `helper.workspace = true`). |
+| `PATH` | a path dependency outside the workspace; it comes from that directory. |
+| `OPTIONAL` | only a feature the members do not enable asks for it (the note names it). Nothing to do by default. |
+
+`resolve --manifest` reads a workspace the same way: point it at the workspace
+root, or at any member's `Cargo.toml`, and the members are not proposed for
+packaging.  A directory is accepted wherever a `Cargo.toml` is asked for.
+
+When the project vendors its crates (`vendor/`, with `replace-with` in
+`.cargo/config.toml`), `workspace` audits the tree too: every vendored crate
+Fedora already ships is a `DROP` — remove that directory and build against the
+package — and only what Fedora lacks is a `KEEP`.  A workspace built in Fedora
+should not vendor what Fedora ships: the vendored copy shadows the system
+package, its version is not the one the rest of the distribution builds with,
+and its updates and security fixes are not tracked.
+
+```
+$T workspace ~/src/myproject              # what it needs, and from where
+$T workspace ~/src/myproject --json       # machine-readable
+$T init --recursive <the NEW crates>      # package what Fedora lacks
+```
+
+Packaging the workspace's own crates is the other job: they are not on
+crates.io, so `cargo package --no-verify --workspace` with
+`regen --crate-file`, or a spec of the cargo2rpm shape (see "Python extension
+modules" above).
 
 ## Packaging inside the upstream repository
 
