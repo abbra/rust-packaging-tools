@@ -52,9 +52,11 @@ def test_is_foreign(target, foreign):
 def test_feature_closure():
     features = {"default": ["std", "derive"], "std": [], "derive": ["dep:synta-derive", "serde?/derive"],
                 "tls": ["rustls/ring"]}
-    feats, deps = rd.archives.feature_closure(features, {"default"})
+    feats, deps, dep_features = rd.archives.feature_closure(features, {"default"})
     assert feats == {"default", "std", "derive"}
     assert "synta-derive" in deps and "serde" not in deps  # "serde?/derive" does not enable serde
+    # the feature a 'dep/feature' reference enables is reported for that dependency
+    assert dep_features == {"serde": {"derive"}}
 
 
 # ─── chroots ────────────────────────────────────────────────────────────────
@@ -394,11 +396,14 @@ def test_resolve_counts_a_matching_local_package(tmp_path, monkeypatch):
 # ─── Rust workspaces ────────────────────────────────────────────────────────
 
 def manifest_dep(name: str, req: str = "*", path: str | None = None,
-                 kind: str | None = None, optional: bool = False) -> dict:
+                 kind: str | None = None, optional: bool = False,
+                 rename: str | None = None, source: str | None = None,
+                 features: list[str] | None = None) -> dict:
     """A dependency as 'cargo metadata' shapes it."""
     return {"name": name, "req": req, "path": path, "kind": kind, "optional": optional,
-            "features": [], "default_features": True, "uses_default_features": True,
-            "target": None, "registry": None if path else "https://github.com/rust-lang/crates.io-index"}
+            "features": features or [], "default_features": True, "uses_default_features": True,
+            "target": None, "registry": None if path else "https://github.com/rust-lang/crates.io-index",
+            "rename": rename, "source": source}
 
 
 def workspace_fixture(root: Path, members: dict[str, list[dict]],
@@ -470,6 +475,108 @@ def test_read_metadata_reports_a_path_dependency_outside_the_workspace(tmp_path)
     assert man.seeds == []
     assert [(r.crate, r.source, r.path) for r in man.requirements] == [
         ("other", "path", str(tmp_path / "extra/other"))]
+
+
+def test_read_metadata_enables_renamed_dependencies_by_their_alias(tmp_path):
+    # Cargo.toml says 'alias-name = { package = "real-crate" }': the features
+    # name the alias, the crates.io lookup needs the real package name
+    meta = workspace_fixture(tmp_path, {"helper": [manifest_dep("real-crate", "^0.2", optional=True, rename="alias-name")]},
+                            features={"helper": {"default": ["dep:alias-name"], "extra": ["dep:alias-name"]}})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    assert [s[0] for s in man.seeds] == ["real-crate"]  # the default feature enables it
+    meta = workspace_fixture(tmp_path, {"helper": [manifest_dep("real-crate", "^0.2", optional=True, rename="alias-name")]},
+                            features={"helper": {"default": [], "native": ["dep:alias-name"]}})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    assert man.seeds == []
+    assert [(r.crate, r.enabled_by) for r in man.optional_requirements()] == [("real-crate", ["native"])]
+
+
+def test_read_metadata_collects_features_enabled_by_member_features(tmp_path):
+    # 'default = ["serde/derive"]' enables 'derive' on serde: resolve must see
+    # it, or a Fedora package without that feature is mistaken for a match
+    meta = workspace_fixture(tmp_path, {"core": [manifest_dep("serde", "^1.0")]},
+                            features={"core": {"default": ["serde/derive"], "full": ["serde/json"]}})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    req = next(r for r in man.requirements if r.crate == "serde")
+    assert "derive" in req.features
+    assert "json" not in req.features  # 'full' is not enabled by the defaults
+
+
+def test_workspace_reports_features_enabled_through_member_features(tmp_path, monkeypatch):
+    fedora = rd.fedora.FedoraIndex({"serde": {"1.0.200": {""}}})  # ships the crate, not the feature
+    meta = workspace_fixture(tmp_path, {"core": [manifest_dep("serde", "^1.0")]},
+                            features={"core": {"default": ["serde/derive"]}})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    found = rd.workspace.classify(man, fedora, {})
+    assert {i.crate: i.status for i in found} == {"serde": "features"}
+
+
+def test_read_metadata_keeps_git_and_alt_registry_out_of_the_crates_io_seeds(tmp_path, monkeypatch):
+    stub_cratesio(monkeypatch, {"serde": ["1.0.229"]}, {"serde": []})
+    meta = workspace_fixture(tmp_path, {"core": [
+        manifest_dep("serde", "^1.0",
+                     source="registry+https://github.com/rust-lang/crates.io-index"),
+        manifest_dep("wip", "^0.1", source="git+https://github.com/others/wip?branch=main"),
+        manifest_dep("custom", "^2.0", source="registry+https://registry.example.com"),
+    ]})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    assert [s[0] for s in man.seeds] == ["serde"]  # only crates.io is asked of resolve
+    assert {r.crate: r.source for r in man.requirements} == {
+        "serde": "registry", "wip": "git", "custom": "alt"}
+    found = rd.workspace.classify(man, rd.fedora.FedoraIndex({}), {})
+    assert {i.crate: i.status for i in found} == {"serde": "new", "wip": "git", "custom": "alt"}
+    assert any("git+https://github.com/others/wip" in n for i in found if i.crate == "wip" for n in i.notes)
+    assert any("registry.example.com" in n for i in found if i.crate == "custom" for n in i.notes)
+
+
+def test_read_metadata_follows_path_dependencies_into_the_requirements(tmp_path, monkeypatch):
+    stub_cratesio(monkeypatch, {"libc": ["0.2.150"]}, {"libc": []})
+    extra = tmp_path / "extra" / "other"
+    extra.mkdir(parents=True)
+    (extra / "Cargo.toml").write_text(
+        '[package]\nname = "other"\nversion = "0.1.0"\n\n'
+        '[dependencies]\nlibc = "^0.2"\ninner = { path = "../inner" }\n'
+        'lazy = { version = "^3", optional = true }\n\n'
+        '[features]\ndefault = []\nnative = ["dep:lazy"]\n')
+    inner = tmp_path / "extra" / "inner"
+    inner.mkdir()
+    (inner / "Cargo.toml").write_text(
+        '[package]\nname = "inner"\nversion = "0.1.0"\n\n[dependencies]\nlibc = "^0.2.150"\n')
+    meta = workspace_fixture(tmp_path, {"core": [manifest_dep("other", path=str(extra))]})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    # the path crate is a leaf in 'cargo metadata --no-deps'; its own registry
+    # requirements — and its nested path crate's — reach resolve
+    assert {r.required_by for r in man.requirements if r.crate == "libc"} == {"other", "inner"}
+    assert [(r.crate, r.source) for r in man.requirements if r.crate == "inner"] == [("inner", "path")]
+    assert [(r.crate, r.enabled_by) for r in man.optional_requirements()] == [("lazy", ["native"])]
+    found = rd.workspace.classify(man, rd.fedora.FedoraIndex({}), {})
+    assert {i.crate: i.status for i in found} == {
+        "other": "path", "inner": "path", "libc": "new", "lazy": "optional"}
+    assert {i.crate: set(i.needed_by) for i in found}["libc"] == {"other", "inner"}
+
+
+def test_read_metadata_reports_a_single_member_workspace_as_a_workspace(tmp_path):
+    (tmp_path / "Cargo.toml").write_text('[workspace]\nresolver = "2"\nmembers = ["crates/only"]\n')
+    manifest = tmp_path / "crates" / "only" / "Cargo.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('[package]\nname = "only"\nversion = "0.1.0"\n')
+    pid = f"path+file://{manifest}#only"
+    meta = {"workspace_members": [pid],
+            "packages": [{"id": pid, "name": "only", "version": "0.1.0",
+                          "manifest_path": str(manifest), "features": {}, "dependencies": []}]}
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    assert man.workspace  # Cargo identifies a workspace even with one member
+    # a plain crate with [workspace.metadata] only is not one
+    (tmp_path / "Cargo.toml").unlink()  # no workspace above it either
+    plain = tmp_path / "plain" / "Cargo.toml"
+    plain.parent.mkdir()
+    plain.write_text('[package]\nname = "plain"\nversion = "0.1.0"\n\n[workspace.metadata.foo]\nbar = 1\n')
+    pid2 = f"path+file://{plain}#plain"
+    meta2 = {"workspace_members": [pid2],
+             "packages": [{"id": pid2, "name": "plain", "version": "0.1.0",
+                           "manifest_path": str(plain), "features": {}, "dependencies": []}]}
+    man2 = rd.resolver.read_metadata(meta2, plain)
+    assert not man2.workspace
 
 
 def test_workspace_root_finds_the_declaration(tmp_path):

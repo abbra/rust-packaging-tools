@@ -68,6 +68,10 @@ def manifest_deps(toml: dict) -> list[dict]:
                     "features": spec.get("features", []),
                     "kind": kind,
                     "target": target,
+                    "path": spec.get("path"),
+                    "workspace": bool(spec.get("workspace")),
+                    "git": spec.get("git"),
+                    "registry": spec.get("registry"),
                 }
             )
 
@@ -84,9 +88,12 @@ def manifest_deps(toml: dict) -> list[dict]:
 
 def feature_closure(
     features: dict[str, list[str]], start: set[str]
-) -> tuple[set[str], set[str]]:
-    """Enabled features and enabled optional dependencies for a set of features."""
+) -> tuple[set[str], set[str], dict[str, set[str]]]:
+    """Enabled features, enabled optional dependencies, and the features each
+    dependency is enabled with: 'default = ["serde/derive"]' enables 'derive'
+    on serde even though the dependency itself does not list it."""
     feats, deps = set(), set()
+    dep_features: dict[str, set[str]] = {}
     stack = list(start)
     while stack:
         f = stack.pop()
@@ -97,10 +104,11 @@ def feature_closure(
             if item.startswith("dep:"):
                 deps.add(item[4:])
             elif "/" in item:
-                d = item.split("/")[0].rstrip("?")
-                if not item.split("/")[0].endswith("?"):
-                    deps.add(d)
+                dep, feat = item.split("/", 1)
+                dep_features.setdefault(dep.rstrip("?"), set()).add(feat)
+                if not dep.endswith("?"):
+                    deps.add(dep)
             else:
                 stack.append(item)
                 deps.add(item)  # implicit feature of an optional dependency
-    return feats, deps
+    return feats, deps, dep_features
