@@ -525,22 +525,15 @@ def make_tui_app() -> type:
                 self._crate_boxes, self._crate_extra = {}, None
                 self._selects, self._choice_inputs = {}, {}
                 self._multi_rows, self._multi_next = {}, collections.Counter()
-                has_crates = has_options = False
                 for c in controls:
                     if c.kind == "crates":
                         await self._render_crates(crates_pane, c)
-                        has_crates = True
                     elif c.kind == "choice":
                         await self._render_choice(options_pane, c)
-                        has_options = True
                     elif c.kind == "multi":
                         await self._render_multi(options_pane, c)
-                        has_options = True
                     else:
                         await self._render_field(options_pane, c.fields[0])
-                        has_options = True
-                crates_pane.display = has_crates
-                options_pane.display = has_options
                 self._update_preview()
 
             self._rebuild = self.run_worker(rebuild(), exclusive=True, group="form")
