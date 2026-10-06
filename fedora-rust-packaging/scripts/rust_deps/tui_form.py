@@ -197,7 +197,10 @@ def tui_missing_required(fields: list[TuiField], values: dict) -> list[str]:
         if not f.required:
             continue
         v = values.get(f.key)
-        if (not v) or (isinstance(v, str) and not v.split()):
+        if isinstance(v, (list, tuple)):
+            if not any(str(p).strip() for p in v):
+                missing.append(f.label)
+        elif (not v) or (isinstance(v, str) and not v.split()):
             missing.append(f.label)
     return missing
 
@@ -214,7 +217,13 @@ def control_is_argument(c: TuiControl) -> bool:
 
 
 def tui_argv(fields: list[TuiField], values: dict) -> list[str]:
-    """Turn form values into command-line arguments; empty fields are left out."""
+    """Turn form values into command-line arguments; empty fields are left out.
+
+    A repeatable field carries its rows as a list, so a value with whitespace
+    in it (a directory whose name has a space) stays one argument; a joined
+    string is split on whitespace for the callers that build one (the crate
+    picker, a playbook carry-over).
+    """
     argv: list[str] = []
     for f in fields:
         v = values.get(f.key)
@@ -222,7 +231,10 @@ def tui_argv(fields: list[TuiField], values: dict) -> list[str]:
             if v:
                 argv.append(f.options[0])
         elif f.kind == "multi":
-            for part in str(v or "").split():
+            parts = list(v) if isinstance(v, (list, tuple)) else str(v or "").split()
+            for part in parts:
+                if not part:
+                    continue
                 if f.positional:
                     argv.append(expand_user_path(part))
                 else:
