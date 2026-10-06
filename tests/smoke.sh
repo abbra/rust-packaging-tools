@@ -65,7 +65,8 @@ grep -q "Workspace $ws (2 member crates" "$root/workspace.out"
 grep -q 'WORKSPACE helper 0.1.0' "$root/workspace.out"
 # the sibling crate is unpublished: it is never proposed for packaging
 grep -qE '^(NEW|UPDATE|FEATURES)[[:space:]]+helper ' "$root/workspace.out" && exit 1
-grep -qE "^(NEW|UPDATE|SYSTEM|PACKAGED|FEATURES)[[:space:]]+$crate " "$root/workspace.out" && exit 1
+# the registry crate is reported with the status its availability implies
+grep -qE "^(NEW|UPDATE|SYSTEM|PACKAGED|FEATURES)[[:space:]]+$crate " "$root/workspace.out" || exit 1
 
 step "init $crate (test discovery ran)"
 "${T[@]}" init --apply-tests "$crate@=$version" | tee "$root/init.out"
