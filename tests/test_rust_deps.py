@@ -1901,11 +1901,19 @@ def test_tui_app_form_splits_crates_and_options_into_panes(tmp_path):
             assert discover.parent is options
             # flags read like the crate rows: one per line, short help inline
             assert "try all test targets" in discover.label.plain
-            # a command without a picker hides the crates pane entirely
+            # the columns are the form, not a per-command choice: a command without a
+            # picker keeps the options in the same second column, so its inputs stay
+            # the same width instead of spanning the whole form
+            form = app.query_one("#form")
+            column = (options.region.x, options.region.width)
+            assert options.region.width < form.region.width
             app._show("copr-log")
             await app._rebuild.wait()
             await pilot.pause()
-            assert not crates.display and options.display
+            assert crates.display and options.display
+            assert crates.region.x < options.region.x
+            assert (options.region.x, options.region.width) == column
+            assert options.region.width < form.region.width
 
     asyncio.run(drive())
 
