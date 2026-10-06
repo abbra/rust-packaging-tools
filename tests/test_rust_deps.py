@@ -624,6 +624,17 @@ def test_manifest_file_accepts_a_project_directory(tmp_path, capsys):
     assert "no Cargo.toml" in capsys.readouterr().err
 
 
+def test_report_init_suggestion_pins_the_audited_versions(tmp_path, monkeypatch, capsys):
+    stub_cratesio(monkeypatch, {"blake3": ["1.5.0", "2.1.0"]}, {"blake3": []})
+    meta = workspace_fixture(tmp_path, {"core": [manifest_dep("blake3", "^1.5")]})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    rd.workspace.report(man, rd.fedora.FedoraIndex({}), {})
+    out = capsys.readouterr().out
+    # 'init' without a version resolves '*' and would pick 2.1.0, not the
+    # 1.5.0 the audit identified for the workspace requirement
+    assert "rust-deps init --recursive blake3@=1.5.0" in out
+
+
 def test_resolve_reports_what_fedora_and_the_tree_already_provide(tmp_path, monkeypatch):
     stub_cratesio(monkeypatch, {"blake3": ["1.5.0"]}, {"blake3": []})
     make_package(tmp_path, "packed", "rust-packed", "2.0.0")
@@ -732,7 +743,8 @@ def test_render_workspace_output_offers_to_package_what_fedora_lacks(tmp_path):
                         ["SYSTEM", "serde", "1.0.229", "^1.0", "core"],
                         ["UPDATE", "clap", "4.5.4", "^4.5", "tool"]]
     # an UPDATE is a decision about Fedora's package, not a new package to create
-    assert [a[:4] for a in actions] == [("init", ["blake3"], ["recursive"], {})]
+    # the NEW jump pins the version the audit identified: 'init' alone resolves '*'
+    assert [a[:4] for a in actions] == [("init", ["blake3@=1.5.0"], ["recursive"], {})]
 
 
 def test_crate_versions_treats_404_as_no_such_crate(monkeypatch):
@@ -1714,7 +1726,8 @@ def test_resolve_results_carry_to_init(tmp_path):
         ("FEATURES", "openssl", "0.10.7")]
     parsed, actions = rd.tui_results.render_resolve_output(lines, tmp_path)
     # only NEW crates become packages to create; UPDATE/FEATURES are decisions, not jumps
-    assert actions[0][:3] == ("init", ["jsonschema"], ["recursive"])
+    # the jump pins the version this run identified: 'init' alone resolves '*'
+    assert actions[0][:3] == ("init", ["jsonschema@=0.21.0"], ["recursive"])
 
 
 def test_update_dry_run_becomes_an_apply_jump():

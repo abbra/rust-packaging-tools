@@ -499,11 +499,12 @@ def render_resolve_output(lines: list[str], root: Path):
     new = [r["crate"] for r in rows if r["status"] == "NEW"]
     if new:
         # the names are not packages yet: they arrive in init's 'other crates' field,
-        # and the target chroot carries over from this resolve run
+        # pinned to the version this run identified, and the target chroot
+        # carries over from this resolve run
         actions.append(
             (
                 "init",
-                new,
+                [f"{r['crate']}@={r['version']}" for r in rows if r["status"] == "NEW"],
                 ["recursive"],
                 {},
                 "not in Fedora or the tree: init --recursive creates the packages",
@@ -559,7 +560,14 @@ def render_workspace_output(lines: list[str], root: Path):
         actions.append(
             (
                 "init",
-                missing,
+                # 'init' without a version resolves '*' and takes the newest
+                # release; the audit already picked the one that satisfies the
+                # workspace requirement, so the jump carries it
+                [
+                    f"{r['crate']}@={r['version']}" if r["version"] else r["crate"]
+                    for r in rows
+                    if r["status"] == "NEW"
+                ],
                 ["recursive"],
                 {},
                 "Fedora has none of these: init --recursive packages them for the project",
