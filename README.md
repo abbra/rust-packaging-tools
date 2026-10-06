@@ -130,7 +130,9 @@ a long list never hides the options;
 mutually exclusive options (`regen --latest/--version/--crate-file`,
 `--compat/--no-compat`) are one mode choice, repeatable options (`-r`,
 `--manifest`, `--koji-task`, …) are add/remove rows, and required arguments
-gate the Run button. The exact `rust-deps …` command line is shown live as
+gate the Run button. A `~` typed into a path is expanded as a shell would
+expand it, since the command runs as a subprocess with no shell in between.
+The exact `rust-deps …` command line is shown live as
 you fill the form. Output streams into the view — diagnostics colored; each
 command's result renders per a declared playbook: verdict tables (`status`,
 `doctor`, `trial`, `srpm`), the review-plan board, stage ladders for `order`,
@@ -153,7 +155,8 @@ an `update -n` plan going to the apply, review-status' `next:` lines, and
 copr-status' resubmit and log commands all become jumps with the right
 crates, flags and values filled in. Keys:
 arrows/enter pick a command or a suggested next step, `tab` moves through the
-form, `ctrl+r` runs, `escape` cancels, `ctrl+q` quits.
+form, `ctrl+r` runs, `escape` cancels, `ctrl+f` gives the log or table the
+whole screen, `ctrl+q` quits.
 
 The full workflow and reference is in
 [`fedora-rust-packaging/references/MANUAL.md`](fedora-rust-packaging/references/MANUAL.md).

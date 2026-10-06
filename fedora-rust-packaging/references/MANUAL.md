@@ -250,6 +250,11 @@ metadata decides the widget:
   mode.
 - **Repeatable options** (`-r`, `--manifest`, `--local-root`, `--koji-task`)
   get rows you add with `+` or remove with `–`.
+- **A `~` typed into a path is expanded** the way a shell expands it: `~`,
+  `~/…` and `~user/…` become the home directory before the command runs,
+  because the form runs `rust-deps` as a subprocess with no shell in between.
+  A `~` that is not the start of a path — a version requirement (`~1.0`), a
+  crate request (`serde@~1.0`) — is passed through unchanged.
 - Flags show as checkbox rows with a short form of their `--help` text inline
   (the full text is the hover tooltip), like the crate rows; other options get
   a labeled field with their `--help` text; defaults are prefilled, numbers get
@@ -312,6 +317,10 @@ metadata decides the widget:
   Log view, with `ERROR:`, `ACTION NEEDED:`, `WARNING:`, `==` blocks, stage
   headers and verdict words (`ok`, `MISSING`, `NEW`, `[!]`, …) colored.
   `escape` cancels a running command; switching commands cancels too.
+- `ctrl+f` gives the Log or Table view the whole screen by hiding the form —
+  a run's output is what needs the room, and the form is what can wait.  Run,
+  Cancel and the command line stay on screen either way; selecting a command
+  brings the form back.
 - The Table view renders each command's output per its playbook — `status`,
   `doctor`, `trial`, `srpm`, `review-plan`, `review-request`, `resolve`,
   `update`, `order`, `copr-status` — verdict lines become rows (`srpm`: crate,
