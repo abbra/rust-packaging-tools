@@ -1806,8 +1806,6 @@ def test_tui_app_repeatable_rows_stay_visible_and_aligned(tmp_path):
             app.query_one("#screens", ContentSwitcher).current = "work"
             await pilot.pause()
 
-            pane = app.query_one("#form-options")
-
             def row_groups(node):
                 """The Horizontal rows of inputs this node holds."""
                 return [
@@ -1816,7 +1814,10 @@ def test_tui_app_repeatable_rows_stay_visible_and_aligned(tmp_path):
                     if isinstance(field.parent, Horizontal)
                 ]
 
-            rows = row_groups(pane)
+            # rows are checked wherever they are mounted: the columns a command puts
+            # them in is another test's contract
+            panes = [app.query_one("#form-args"), app.query_one("#form-options")]
+            rows = [row for pane in panes for row in row_groups(pane)]
             assert rows, "the repeatable arguments render no input rows"
             for row in rows:
                 field = row.query_one(Input)
@@ -1833,23 +1834,24 @@ def test_tui_app_repeatable_rows_stay_visible_and_aligned(tmp_path):
                 assert row.parent.region.height >= len(row.parent.children) * (
                     rd.tui_app.FORM_ROW_HEIGHT
                 )
-            # nothing else in the pane shares rows with an input row
-            groups = [w for w in pane.children if row_groups(w)]
-            occupied = sorted(
-                (r.region.y, r.region.y + r.region.height)
-                for w in groups
-                for r in row_groups(w)
-            )
-            for widget in pane.children:
-                if widget in groups:
-                    continue
-                span = (widget.region.y, widget.region.y + widget.region.height)
-                assert all(top >= span[1] or bottom <= span[0] for top, bottom in occupied), (
-                    f"{type(widget).__name__} overlaps an input row"
+            # nothing else in a pane shares rows with an input row
+            for pane in panes:
+                groups = [w for w in pane.children if row_groups(w)]
+                occupied = sorted(
+                    (r.region.y, r.region.y + r.region.height)
+                    for w in groups
+                    for r in row_groups(w)
                 )
+                for widget in pane.children:
+                    if widget in groups:
+                        continue
+                    span = (widget.region.y, widget.region.y + widget.region.height)
+                    assert all(
+                        top >= span[1] or bottom <= span[0] for top, bottom in occupied
+                    ), f"{type(widget).__name__} overlaps an input row"
 
             # typing lands in the row and reaches the preview
-            field = app.query("#form-options Input").first()
+            field = app.query("#form Input").first()
             app.set_focus(field)
             await pilot.press(*str(tmp_path / "ws"))
             assert field.value == str(tmp_path / "ws")
@@ -1876,9 +1878,16 @@ def test_tui_app_repeatable_rows_stay_visible_and_aligned(tmp_path):
     asyncio.run(drive())
 
 
-def test_tui_app_form_splits_crates_and_options_into_panes(tmp_path):
+def test_tui_app_form_splits_arguments_and_options_into_panes(tmp_path):
+    """Arguments on the left, options on the right, on every command screen.
+
+    The columns are the form itself: what a command acts on (the crate picker, a
+    positional path or crate name) is mounted in the left one, every declared
+    option in the right one, and both keep the same geometry from command to
+    command so a command's inputs never span the whole form.
+    """
     pytest.importorskip("textual")
-    from textual.widgets import Checkbox, ContentSwitcher
+    from textual.widgets import Checkbox, ContentSwitcher, Input
     app_class = rd.tui_app.make_tui_app()
     make_package(tmp_path, "a", "rust-a", "0.1.0")
 
@@ -1888,32 +1897,63 @@ def test_tui_app_form_splits_crates_and_options_into_panes(tmp_path):
             await pilot.pause()
             app.query_one("#screens", ContentSwitcher).current = "work"
             await pilot.pause()
-            # a command with both: picker and options sit side by side, both visible
+            args = app.query_one("#form-args")
+            options = app.query_one("#form-options")
+            form = app.query_one("#form")
+            column = None
+
+            def columns_are_the_form():
+                """Both columns are laid out, side by side, at the same place."""
+                nonlocal column
+                assert args.display and options.display
+                assert args.region.x < options.region.x, (
+                    "the panes are stacked, not side by side"
+                )
+                assert options.region.width < form.region.width
+                if column is None:
+                    column = (options.region.x, options.region.width)
+                assert (options.region.x, options.region.width) == column, (
+                    "the columns move from command to command"
+                )
+
+            # a command whose argument is the crate picker
             app._show("trial")
             await app._rebuild.wait()
             await pilot.pause()
-            crates = app.query_one("#form-crates")
-            options = app.query_one("#form-options")
-            assert crates.display and options.display
-            assert crates.region.x < options.region.x, "the panes are stacked, not side by side"
-            assert app.query_one(f"#{app._wid('pk-a')}", Checkbox).parent is crates
+            columns_are_the_form()
+            assert app.query_one(f"#{app._wid('pk-a')}", Checkbox).parent is args
             discover = app.query_one(f"#{app._wid('f-discover')}", Checkbox)
             assert discover.parent is options
             # flags read like the crate rows: one per line, short help inline
             assert "try all test targets" in discover.label.plain
-            # the columns are the form, not a per-command choice: a command without a
-            # picker keeps the options in the same second column, so its inputs stay
-            # the same width instead of spanning the whole form
-            form = app.query_one("#form")
-            column = (options.region.x, options.region.width)
-            assert options.region.width < form.region.width
+
+            # a command whose argument is a positional path: its input rows are the
+            # left column, and every option -- even one that takes a value -- stays
+            # in the right one
+            app._show("workspace")
+            await app._rebuild.wait()
+            await pilot.pause()
+            columns_are_the_form()
+            assert app._rows_holder("projects").parent is args
+            assert app._rows_holder("local_root").parent is options
+            assert app.query_one(f"#{app._wid('f-target')}", Input).parent is options
+            assert app.query_one(f"#{app._wid('f-json')}", Checkbox).parent is options
+            assert app.query_one(f"#{app._wid('f-refresh')}", Checkbox).parent is options
+
+            # a command whose only argument is a single crate name
             app._show("copr-log")
             await app._rebuild.wait()
             await pilot.pause()
-            assert crates.display and options.display
-            assert crates.region.x < options.region.x
-            assert (options.region.x, options.region.width) == column
-            assert options.region.width < form.region.width
+            columns_are_the_form()
+            assert app.query_one(f"#{app._wid('f-crate')}", Input).parent is args
+            assert app.query_one(f"#{app._wid('f-chroot')}", Input).parent is options
+
+            # a command with nothing to type leaves both columns empty
+            app._show("doctor")
+            await app._rebuild.wait()
+            await pilot.pause()
+            columns_are_the_form()
+            assert not args.children and not options.children
 
     asyncio.run(drive())
 
