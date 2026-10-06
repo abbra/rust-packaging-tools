@@ -15,12 +15,16 @@ from . import packages
 from . import util
 from . import versions
 
+# cargo metadata's 'source' for a crates.io dependency; anything else that
+# starts with 'registry+' is an alternate registry, 'git+' a Git repository.
+CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
+
 
 @dataclass
 class Needed:
     crate: str
     version: str
-    status: str  # "new" | "update" | "features" | "fedora" | "local"
+    status: str  # "new" | "update" | "features" | "fedora" | "local" | "optional"
     fedora_versions: list[str]
     reqs: set[str] = field(default_factory=set)
     needed_by: set[str] = field(default_factory=set)
@@ -54,6 +58,7 @@ class Requirement:
     required_by: str
     source: str
     path: str | None = None
+    origin: str = ""  # cargo metadata's source: 'git+…' or a non-crates.io registry
     optional: bool = False
     default_enabled: bool = False  # enabled by the member's default features
     enabled_by: list[str] = field(default_factory=list)  # features that would enable it
@@ -68,10 +73,11 @@ class Manifest:
     members: list[Member]
     scope: list[Member]  # the members the request was about
     requirements: list[Requirement]
+    declared: bool = False  # a Cargo.toml declares the [workspace] this is in
 
     @property
     def workspace(self) -> bool:
-        return len(self.members) > 1
+        return self.declared
 
     @property
     def seeds(self) -> list[tuple[str, str, str, list[str]]]:
@@ -123,6 +129,15 @@ def manifest_file(path: Path) -> Path:
     return path
 
 
+def declares_workspace(manifest: Path) -> bool:
+    """Whether this Cargo.toml declares a [workspace] (not just [workspace.metadata])."""
+    try:
+        table = tomllib.loads(manifest.read_text()).get("workspace")
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(table, dict) and bool(set(table) - {"metadata"})
+
+
 def workspace_root(manifest: Path) -> Path:
     """The directory whose Cargo.toml declares the [workspace] a manifest is in.
 
@@ -130,14 +145,7 @@ def workspace_root(manifest: Path) -> Path:
     one, the manifest's own directory is the root.
     """
     for d in [manifest.parent, *manifest.parent.parents]:
-        f = d / "Cargo.toml"
-        if not f.is_file():
-            continue
-        try:
-            table = tomllib.loads(f.read_text()).get("workspace")
-        except (tomllib.TOMLDecodeError, UnicodeDecodeError):
-            continue
-        if isinstance(table, dict) and set(table) - {"metadata"}:
+        if declares_workspace(d / "Cargo.toml"):
             return d
     return manifest.parent
 
@@ -194,41 +202,152 @@ def read_metadata(meta: dict, asked: Path) -> Manifest:
         if Path(p["manifest_path"]).resolve() not in scoped:
             continue
         declared = p.get("features") or {}
-        _, enabled = archives.feature_closure(declared, {"default"})
+        _, enabled, dep_features = archives.feature_closure(declared, {"default"})
         for d in p.get("dependencies") or []:
             if versions.is_foreign(d.get("target")):
                 continue
             path = d.get("path")
             optional = bool(d.get("optional"))
+            # a renamed dependency is referenced by its alias in the features
+            alias = d.get("rename") or d["name"]
+            src = d.get("source") or ""
             requirements.append(
                 Requirement(
                     crate=d["name"],
                     req=d.get("req") or "*",
                     kind=d.get("kind") or "normal",
-                    features=list(d.get("features") or [])
-                    + (["default"] if d.get("uses_default_features") else []),
+                    features=list(
+                        dict.fromkeys(
+                            list(d.get("features") or [])
+                            + (["default"] if d.get("uses_default_features") else [])
+                            + sorted(dep_features.get(alias, ()))
+                        )
+                    ),
                     required_by=p["name"],
                     source="workspace"
                     if path and Path(path).resolve() in inside
                     else "path"
                     if path
+                    else "git"
+                    if src.startswith("git+")
+                    else "alt"
+                    if src.startswith("registry+")
+                    and not src.startswith(CRATES_IO)
                     else "registry",
                     path=path,
+                    origin=src,
                     optional=optional,
-                    default_enabled=d["name"] in enabled,
+                    default_enabled=alias in enabled,
                     enabled_by=sorted(
                         f
                         for f in declared
                         if f != "default"
-                        and d["name"] in archives.feature_closure(declared, {f})[1]
+                        and alias in archives.feature_closure(declared, {f})[1]
                     )
                     if optional
                     else [],
                 )
             )
+    # a path dependency outside the workspace is a leaf in 'cargo metadata
+    # --no-deps': what it itself asks for is read from its own Cargo.toml, or
+    # the build's need for those crates would go unreported.
+    seen = {m.manifest.resolve() for m in members}
+    for r in list(requirements):
+        if r.source == "path":
+            requirements.extend(path_requirements(r.path, r.crate, seen))
     return Manifest(
-        path=asked, root=root, members=members, scope=scope, requirements=requirements
+        path=asked,
+        root=root,
+        members=members,
+        scope=scope,
+        requirements=requirements,
+        declared=declares_workspace(root / "Cargo.toml"),
     )
+
+
+def path_requirements(
+    path: str, required_by: str, seen: set[Path]
+) -> list[Requirement]:
+    """What a path dependency outside the workspace asks for, from its Cargo.toml.
+
+    'cargo metadata --no-deps' describes only the workspace members, so such a
+    crate is a leaf there: its own registry requirements — and the path crates
+    it in turn points at — are read here, or the build's need for them would
+    go unreported.  A crate already seen is not walked again.
+    """
+    manifest = Path(path)
+    if manifest.is_dir():
+        manifest = manifest / "Cargo.toml"
+    if not manifest.is_file():
+        return []
+    manifest = manifest.resolve()
+    if manifest in seen:
+        return []
+    seen.add(manifest)
+    try:
+        toml = tomllib.loads(manifest.read_text())
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return []
+    crate = (toml.get("package") or {}).get("name") or required_by
+    declared = toml.get("features") or {}
+    inherited = (toml.get("workspace") or {}).get("dependencies") or {}
+    for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+        table = toml.get(key) or {}
+        for name, spec in list(table.items()):
+            if isinstance(spec, dict) and spec.get("workspace"):
+                base = dict(inherited.get(name) or {})
+                base.update({k: v for k, v in spec.items() if k != "workspace"})
+                table[name] = base or {"version": "*"}
+    _, enabled, dep_features = archives.feature_closure(declared, {"default"})
+    out: list[Requirement] = []
+    for d in archives.manifest_deps(toml):
+        if versions.is_foreign(d.get("target")):
+            continue
+        alias = d["name"]
+        if d["path"]:
+            nested = str(manifest.parent / d["path"])
+            out.append(
+                Requirement(
+                    crate=d["crate_id"],
+                    req=d["req"] or "*",
+                    kind=d["kind"],
+                    features=[],
+                    required_by=crate,
+                    source="path",
+                    path=nested,
+                )
+            )
+            out.extend(path_requirements(nested, d["crate_id"], seen))
+            continue
+        optional = bool(d["optional"])
+        out.append(
+            Requirement(
+                crate=d["crate_id"],
+                req=d["req"] or "*",
+                kind=d["kind"],
+                features=list(
+                    dict.fromkeys(
+                        list(d["features"])
+                        + (["default"] if d["default_features"] else [])
+                        + sorted(dep_features.get(alias, ()))
+                    )
+                ),
+                required_by=crate,
+                source="git" if d["git"] else "alt" if d["registry"] else "registry",
+                origin=str(d["git"] or d["registry"] or ""),
+                optional=optional,
+                default_enabled=alias in enabled,
+                enabled_by=sorted(
+                    f
+                    for f in declared
+                    if f != "default"
+                    and alias in archives.feature_closure(declared, {f})[1]
+                )
+                if optional
+                else [],
+            )
+        )
+    return out
 
 
 def read_manifest(path: Path) -> Manifest:
@@ -299,7 +418,7 @@ def resolve(
             n.needed_by.add(why)
             n.reqs.add(req)
         n.features |= new_feats
-        _, enabled = archives.feature_closure(v.get("features") or {}, n.features)
+        _, enabled, _ = archives.feature_closure(v.get("features") or {}, n.features)
         n.missing_optional, n.missing_dev = [], []
         for d in cratesio.crate_dependencies(name, v["num"]):
             if versions.is_foreign(d.get("target")):

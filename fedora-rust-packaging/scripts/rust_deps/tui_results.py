@@ -516,8 +516,10 @@ _ORDER_STAGE_RE = re.compile(r"^stage (\d+): (.*)$")
 
 
 _WORKSPACE_ROW_RE = re.compile(
-    r"^(SYSTEM|PACKAGED|FEATURES|UPDATE|NEW|WORKSPACE|PATH|OPTIONAL)\s+"
-    r"(\S+)(?:\s+(?!req\b)(\S+))?(.*?)$"
+    r"^(SYSTEM|PACKAGED|FEATURES|UPDATE|NEW|WORKSPACE|PATH|GIT|ALTREG|OPTIONAL)\s+"
+    # the version is optional: the '<-' that opens the needed-by list must not
+    # be taken for it, or a row without a version loses its needed_by
+    r"(\S+)(?:\s+(?!req\b|<-)(\S+))?(.*?)$"
 )
 
 

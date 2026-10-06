@@ -31,9 +31,22 @@ LABELS = {
     "new": "NEW",
     "workspace": "WORKSPACE",
     "path": "PATH",
+    "git": "GIT",
+    "alt": "ALTREG",
     "optional": "OPTIONAL",
 }
-ORDER = ["fedora", "local", "features", "update", "new", "workspace", "path", "optional"]
+ORDER = [
+    "fedora",
+    "local",
+    "features",
+    "update",
+    "new",
+    "workspace",
+    "path",
+    "git",
+    "alt",
+    "optional",
+]
 ADVICE = {
     "fedora": "Fedora ships this version: the spec BuildRequires crate(<name>); do not vendor it.",
     "local": "already packaged in the packages root; build against it.",
@@ -42,6 +55,8 @@ ADVICE = {
     "new": "not in Fedora; package it with 'rust-deps init' or keep it vendored.",
     "workspace": "a member of the workspace; the source tree provides it.",
     "path": "a path dependency outside the workspace; it comes from that directory.",
+    "git": "a dependency from a Git repository; not a crates.io crate, so no Fedora package provides it.",
+    "alt": "a dependency from an alternate registry; not a crates.io crate, so no Fedora package provides it.",
     "optional": "only a feature the members do not enable asks for it; nothing to do by default.",
 }
 SUMMARY = {
@@ -52,6 +67,8 @@ SUMMARY = {
     "new": "not in Fedora",
     "workspace": "workspace members",
     "path": "local path dependencies",
+    "git": "from a Git repository",
+    "alt": "from an alternate registry",
     "optional": "only for a feature that is not enabled",
 }
 
@@ -137,6 +154,16 @@ def items(
                 item.reqs.append(r.req)
             item.needed_by.append(r.required_by)
             item.notes.append(f"from {r.path}")
+        elif r.source in ("git", "alt"):
+            item = found.setdefault(
+                (r.crate, r.source, ""), Item(crate=r.crate, status=r.source)
+            )
+            if r.req and r.req != "*":
+                item.reqs.append(r.req)
+            item.needed_by.append(r.required_by)
+            item.notes.append(
+                f"from {r.origin}" if r.origin else "from a Git repository or alternate registry"
+            )
     for r in manifest.optional_requirements():
         item = found.setdefault(
             (r.crate, "optional", ""), Item(crate=r.crate, status="optional")
