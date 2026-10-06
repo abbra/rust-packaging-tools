@@ -236,8 +236,10 @@ metadata decides the widget:
   crates, Create, Test, Build, COPR builds, Review, In Fedora.
 - **The form is two panes side by side**: the crate picker on the left, the
   options on the right, each option a line of its own — so a long crate list
-  never pushes the options out of view.  A command without a picker (e.g.
-  `copr-log`) uses the full width; one without options shows only the picker.
+  never pushes the options out of view.  Those columns are the form, not a
+  per-command choice: a command without a picker (e.g. `workspace`,
+  `copr-log`) keeps its options in the right column at the same width, with
+  the left one simply empty; one without options leaves the right empty.
 - **Crate selection** (the positional `crates` plus `--all`): a checkbox per
   package actually found under the root (with its version), a field for crates
   not in the tree yet (`init`, `resolve`), and the `--all` switch.
