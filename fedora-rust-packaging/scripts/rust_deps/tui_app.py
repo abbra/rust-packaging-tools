@@ -758,11 +758,13 @@ def make_tui_app() -> type:
                         widget = self._choice_inputs.get(f.group)
                         out[f.key] = widget.value if widget is not None else ""
                 elif f.kind == "multi":  # repeatable option, or repeatable positional
-                    out[f.key] = " ".join(
+                    # one entry per row: a path with a space in it stays one
+                    # argument instead of being joined and split apart
+                    out[f.key] = [
                         r.value.strip()
                         for r in self._multi_rows.get(f.key, [])
                         if r.value.strip()
-                    )
+                    ]
                 else:
                     widget = self._widgets.get(f.key)
                     if widget is not None:
@@ -864,7 +866,9 @@ def make_tui_app() -> type:
             ]
             # the playbook carry lists read from here when the next command opens
             self._last_form_values = {
-                k: v for k, v in values.items() if isinstance(v, str) and v.strip()
+                k: " ".join(v) if isinstance(v, list) else v
+                for k, v in values.items()
+                if (isinstance(v, str) and v.strip()) or (isinstance(v, list) and v)
             }
             log = self.query_one("#log", RichLog)
             log.clear()

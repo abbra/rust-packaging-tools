@@ -1486,6 +1486,17 @@ def test_tui_argv_expands_a_tilde_the_way_a_shell_would(tmp_path, monkeypatch):
     assert rd.tui_form.expand_user_path("~nosuchuser123/x") == "~nosuchuser123/x"
 
 
+def test_tui_argv_keeps_each_repeatable_row_as_one_argument():
+    # a row's value is a list entry, not a token in a joined string: a project
+    # path with a space reaches 'workspace' as the one argument it was typed as
+    fields = rd.tui_form.tui_fields(_subcommand_parsers()["workspace"])
+    argv = rd.tui_form.tui_argv(fields, {"projects": ["/tmp/my workspace", "/other/Cargo.toml"],
+                                         "local_root": []})
+    assert argv == ["/tmp/my workspace", "/other/Cargo.toml"]
+    assert rd.tui_form.tui_missing_required(fields, {"projects": []})
+    assert not rd.tui_form.tui_missing_required(fields, {"projects": ["/tmp/my workspace"]})
+
+
 def test_tui_fields_prefill_defaults_and_type_numbers():
     fields = {f.dest: f for f in rd.tui_form.tui_fields(_subcommand_parsers()["mock-chain"])}
     assert fields["chroot"].default == "fedora-rawhide-x86_64"
@@ -1976,9 +1987,9 @@ def test_tui_app_renders_a_positional_repeatable_workspace_argument(tmp_path):
             await app._rebuild.wait()
             # 'workspace' takes repeatable positional paths: rows of inputs, no option string
             assert app.query_one("#run").disabled  # the argument is required
-            app.query_one(f"#{app._wid('f-projects-0')}", Input).value = str(tmp_path / "ws")
+            app.query_one(f"#{app._wid('f-projects-0')}", Input).value = str(tmp_path / "my ws")
             await pilot.pause()
-            assert app._argv() == [str(tmp_path / "ws")]
+            assert app._argv() == [str(tmp_path / "my ws")]  # one argument, not two
             assert not app.query_one("#run").disabled
 
     asyncio.run(drive())
