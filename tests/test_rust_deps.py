@@ -2023,7 +2023,82 @@ def test_tui_app_results_take_the_whole_screen_when_asked(tmp_path):
             app._show("status")
             await app._rebuild.wait()
             await pilot.pause()
-            assert form.display and view.region.height == squeezed
+            assert form.display, "the form stayed hidden"
+            # the log keeps the rows this command's form leaves it, to the bottom
+            work = app.query_one("#work").region
+            assert view.region.y + view.region.height == work.y + work.height
+
+    asyncio.run(drive())
+
+
+def test_tui_app_leaves_no_dead_rows_between_the_form_and_the_log(tmp_path):
+    """Every row between a form and the log belongs to a widget.
+
+    Textual's Horizontal defaults to 'height: 1fr', so the run bar was competing
+    with the log for whatever space the form left — twelve rows to show one line
+    of buttons — and the form kept its full cap even with nothing to show.
+    """
+    pytest.importorskip("textual")
+    from textual.containers import Vertical
+    from textual.widgets import ContentSwitcher
+    app_class = rd.tui_app.make_tui_app()
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(100, 46)) as pilot:
+            await pilot.pause()
+            app.query_one("#screens", ContentSwitcher).current = "work"
+            await pilot.pause()
+
+            def parts():
+                return {w.id: w for w in app.query_one("#work").children}
+
+            def nothing_is_idle():
+                """The form is its content; the log runs to the bottom."""
+                form, runbar = parts()["form"], parts()["runbar"]
+                tabs, view = parts()["tabs"], parts()["view"]
+                tallest = max(
+                    pane.content_region.height
+                    for pane in app.query("#form Vertical")
+                    if pane.id
+                )
+                assert form.region.height == tallest, "the form holds rows it does not show"
+                assert runbar.region.y + runbar.region.height == tabs.region.y, (
+                    "dead rows between the run bar and the results"
+                )
+                assert tabs.region.y + tabs.region.height == view.region.y
+                work = app.query_one("#work").region
+                assert view.region.y + view.region.height == work.y + work.height, (
+                    "the log stops short of the bottom"
+                )
+                return view.region.height
+
+            # a command with nothing to type holds no rows at all
+            app._show("doctor")
+            await app._rebuild.wait()
+            await pilot.pause()
+            assert parts()["form"].region.height == 0
+            empty = nothing_is_idle()
+
+            # a short form is exactly as tall as its tallest column
+            app._show("workspace")
+            await app._rebuild.wait()
+            await pilot.pause()
+            assert 0 < parts()["form"].region.height < 16
+            short = nothing_is_idle()
+            assert short < empty, "a form took rows the log already had"
+
+            # a form longer than the cap is cut to it and scrolls
+            for i in range(8):
+                make_package(tmp_path, f"c{i}", f"rust-c{i}", "0.1.0")
+            app._show("review-request")
+            await app._rebuild.wait()
+            await pilot.pause()
+            nothing_is_idle()
+            assert parts()["form"].region.height <= 16
+            assert app.query_one("#form-options", Vertical).max_scroll_y > 0, (
+                "the long column is cut off instead of scrollable"
+            )
 
     asyncio.run(drive())
 
