@@ -200,6 +200,17 @@ def tui_missing_required(fields: list[TuiField], values: dict) -> list[str]:
     return missing
 
 
+def control_is_argument(c: TuiControl) -> bool:
+    """Whether a control names *what the command acts on* rather than *how to run it*.
+
+    The crate picker and anything positional (workspace paths, a crate name) is an
+    argument and belongs in the form's argument column.  Anything declared with an
+    option string is an option, even when it takes a value: it belongs to the
+    options column, next to the rest of the switches.
+    """
+    return c.kind == "crates" or bool(c.fields and c.fields[0].positional)
+
+
 def tui_argv(fields: list[TuiField], values: dict) -> list[str]:
     """Turn form values into command-line arguments; empty fields are left out."""
     argv: list[str] = []

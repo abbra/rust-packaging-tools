@@ -121,11 +121,12 @@ to that command with the right crates already picked. The Overview refreshes
 after every run.
 The form for the selected command is built from the same argparse metadata as
 `--help` (so the UI and the command line can never drift apart), rendered as
-what the parser says it is, in two panes side by side: the crate selection is
-a list of checkboxes over the packages under `--root` plus a field for new
-`CRATE[@REQ]` names on the left, every option a readable row of its own on the
-right (flags with a short form of their `--help` inline), so a long crate list
-never hides the options;
+what the parser says it is, in two columns: what the command acts on on the
+left — the crate selection as a list of checkboxes over the packages under
+`--root` plus a field for new `CRATE[@REQ]` names, or a positional argument
+such as `workspace`'s `DIR|Cargo.toml` rows — and every option a readable row
+of its own on the right (flags with a short form of their `--help` inline), so
+a long list never hides the options;
 mutually exclusive options (`regen --latest/--version/--crate-file`,
 `--compat/--no-compat`) are one mode choice, repeatable options (`-r`,
 `--manifest`, `--koji-task`, …) are add/remove rows, and required arguments

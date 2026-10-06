@@ -142,7 +142,7 @@ def make_tui_app() -> type:
             #work { width: 1fr; }
             #cmd-help { height: auto; max-height: 3; padding: 0 1; }
             #form { height: auto; max-height: 16; }
-            #form-crates, #form-options { width: 1fr; padding: 0 1; overflow-y: auto; }
+            #form-args, #form-options { width: 1fr; padding: 0 1; overflow-y: auto; }
             #form .field-label { color: $text-muted; height: 1; }
             #form Input { width: 100%; height: 3; }
             #form Select { width: 100%; height: 3; }
@@ -225,10 +225,11 @@ def make_tui_app() -> type:
                         yield OptionList(id="suggestions")
                     with Vertical(id="work"):
                         yield Static("", id="cmd-help")
-                        # crate picker and options sit side by side: both stay visible
-                        # instead of the options hiding below a long crate list
+                        # the form is always two columns: the arguments the command acts
+                        # on (crate picker, positional paths) on the left, its options on
+                        # the right, so a long list never pushes options out of view
                         with Horizontal(id="form"):
-                            yield Vertical(id="form-crates")
+                            yield Vertical(id="form-args")
                             yield Vertical(id="form-options")
                         with Horizontal(id="runbar"):
                             yield Button("Run", id="run", variant="primary")
@@ -517,23 +518,29 @@ def make_tui_app() -> type:
                 # stay registered until their async teardown completes, so ids must not
                 # repeat; and mounts are awaited so widgets are ready to use at once
                 self._gen += 1
-                crates_pane = self.query_one("#form-crates", Vertical)
+                args_pane = self.query_one("#form-args", Vertical)
                 options_pane = self.query_one("#form-options", Vertical)
-                await crates_pane.remove_children()
+                await args_pane.remove_children()
                 await options_pane.remove_children()
                 self._fields, self._widgets = fields, {}
                 self._crate_boxes, self._crate_extra = {}, None
                 self._selects, self._choice_inputs = {}, {}
                 self._multi_rows, self._multi_next = {}, collections.Counter()
                 for c in controls:
+                    # left column: what the command acts on (the crate picker, positional
+                    # paths); right column: how to run it (every declared option, even
+                    # the ones that take a value)
+                    pane = (
+                        args_pane if tui_form.control_is_argument(c) else options_pane
+                    )
                     if c.kind == "crates":
-                        await self._render_crates(crates_pane, c)
+                        await self._render_crates(pane, c)
                     elif c.kind == "choice":
-                        await self._render_choice(options_pane, c)
+                        await self._render_choice(pane, c)
                     elif c.kind == "multi":
-                        await self._render_multi(options_pane, c)
+                        await self._render_multi(pane, c)
                     else:
-                        await self._render_field(options_pane, c.fields[0])
+                        await self._render_field(pane, c.fields[0])
                 self._update_preview()
 
             self._rebuild = self.run_worker(rebuild(), exclusive=True, group="form")
