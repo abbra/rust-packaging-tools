@@ -234,12 +234,13 @@ metadata decides the widget:
   after every run.
 - The sidebar lists all commands, grouped as in the Quick start: Setup, Missing
   crates, Create, Test, Build, COPR builds, Review, In Fedora.
-- **The form is two panes side by side**: the crate picker on the left, the
-  options on the right, each option a line of its own — so a long crate list
-  never pushes the options out of view.  Those columns are the form, not a
-  per-command choice: a command without a picker (e.g. `workspace`,
-  `copr-log`) keeps its options in the right column at the same width, with
-  the left one simply empty; one without options leaves the right empty.
+- **The form is two columns**: what the command acts on on the left — the crate
+  picker, or a positional argument such as `workspace`'s `DIR|Cargo.toml` rows
+  or `copr-log`'s crate name — and its options on the right, each one a line of
+  its own, so a long list never pushes the options out of view.  The columns are
+  the form, not a per-command choice: an option stays in the right column even
+  when it takes a value (`--local-root`, `-r/--chroot`), and a command with
+  nothing to type (`doctor`) leaves both columns empty.
 - **Crate selection** (the positional `crates` plus `--all`): a checkbox per
   package actually found under the root (with its version), a field for crates
   not in the tree yet (`init`, `resolve`), and the `--all` switch.
