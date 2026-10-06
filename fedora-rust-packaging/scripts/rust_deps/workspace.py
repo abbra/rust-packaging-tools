@@ -255,7 +255,11 @@ def report(manifest: resolver.Manifest, index: fedora.FedoraIndex, local: dict) 
         util.info("")
         util.info(
             "Package what Fedora lacks: rust-deps init --recursive "
-            + " ".join(i.crate for i in found if i.status == "new")
+            + " ".join(
+                f"{i.crate}@={i.version}" if i.version else i.crate
+                for i in found
+                if i.status == "new"
+            )
             + "  (or keep those vendored)."
         )
     if counts["update"]:
