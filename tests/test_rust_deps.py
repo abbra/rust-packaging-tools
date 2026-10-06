@@ -1288,6 +1288,29 @@ def test_tui_argv_repeats_append_options_and_skips_empty_fields():
                     "--ignore-local", "--chroot", "fedora-44-x86_64"]
 
 
+def test_tui_argv_expands_a_tilde_the_way_a_shell_would(tmp_path, monkeypatch):
+    """A form runs its command as a subprocess: nothing else expands a '~' typed here."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    fields = rd.tui_form.tui_fields(_subcommand_parsers()["workspace"])
+    argv = rd.tui_form.tui_argv(
+        fields, {"projects": "~/ws ~/other/Cargo.toml", "local_root": "~"}
+    )
+    assert argv == [
+        str(tmp_path / "ws"),
+        str(tmp_path / "other" / "Cargo.toml"),
+        "--local-root",
+        str(tmp_path),
+    ]
+    # a '~' that is not the start of a path stays exactly as typed
+    fields = rd.tui_form.tui_fields(_subcommand_parsers()["init"])
+    assert rd.tui_form.tui_argv(fields, {"crates": "serde@~1.0 zmij"}) == [
+        "serde@~1.0",
+        "zmij",
+    ]
+    assert rd.tui_form.expand_user_path("~1.0") == "~1.0"
+    assert rd.tui_form.expand_user_path("~nosuchuser123/x") == "~nosuchuser123/x"
+
+
 def test_tui_fields_prefill_defaults_and_type_numbers():
     fields = {f.dest: f for f in rd.tui_form.tui_fields(_subcommand_parsers()["mock-chain"])}
     assert fields["chroot"].default == "fedora-rawhide-x86_64"
@@ -1954,6 +1977,53 @@ def test_tui_app_form_splits_arguments_and_options_into_panes(tmp_path):
             await pilot.pause()
             columns_are_the_form()
             assert not args.children and not options.children
+
+    asyncio.run(drive())
+
+
+def test_tui_app_results_take_the_whole_screen_when_asked(tmp_path):
+    """ctrl+f hands the log or table the rows the form was holding, and back.
+
+    '#view' is 'height: 1fr', so a filled form is what squeezes a run's output:
+    the toggle hides the form only, and the run bar keeps Run and the command line.
+    """
+    pytest.importorskip("textual")
+    from textual.widgets import ContentSwitcher
+    app_class = rd.tui_app.make_tui_app()
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#screens", ContentSwitcher).current = "work"
+            await pilot.pause()
+            app._show("trial")
+            await app._rebuild.wait()
+            await pilot.pause()
+            form, view = app.query_one("#form"), app.query_one("#view")
+            assert form.display and form.region.height > 0
+            squeezed = view.region.height
+
+            await pilot.press("ctrl+f")
+            await pilot.pause()
+            assert not form.display, "the form still holds rows"
+            assert view.region.height > squeezed, "the log did not gain the rows"
+            assert app.query_one("#run").display, "Run went away with the form"
+            assert app.query_one("#preview").display, "the command line went away"
+
+            await pilot.press("ctrl+f")
+            await pilot.pause()
+            assert form.display and view.region.height == squeezed
+
+            # choosing a command means wanting to fill it in: the form comes back
+            await pilot.press("ctrl+f")
+            await pilot.pause()
+            assert not form.display
+            app._show("status")
+            await app._rebuild.wait()
+            await pilot.pause()
+            assert form.display and view.region.height == squeezed
 
     asyncio.run(drive())
 
