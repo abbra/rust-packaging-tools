@@ -171,6 +171,7 @@ def make_tui_app() -> type:
         BINDINGS = [
             ("ctrl+r", "run_command", "Run"),
             ("escape", "cancel_command", "Cancel"),
+            ("ctrl+f", "toggle_results", "Full results"),
         ]
 
         def __init__(self, root: Path) -> None:
@@ -179,6 +180,7 @@ def make_tui_app() -> type:
             self._cmd: str | None = None
             self._fields: list[tui_form.TuiField] = []
             self._widgets: dict[str, object] = {}
+            self._results_full = False
             self._proc = None
             self._stdout: list[str] = []
             self._rebuild = None
@@ -497,6 +499,8 @@ def make_tui_app() -> type:
         ) -> None:
             self._cancel_proc()
             self._cmd = name
+            # choosing a command means wanting to fill it in: the form comes back
+            self._set_results_full(False)
             # the result views belong to the previous command: start from the log
             self.query_one("#tabs", Tabs).active = "log"
             self._prefill = set(prefill or [])
@@ -547,6 +551,19 @@ def make_tui_app() -> type:
 
         def _wid(self, key: str) -> str:
             return f"z{self._gen}-{key}"
+
+        def _set_results_full(self, full: bool) -> None:
+            """Hand the log or table the whole screen, or give the form back.
+
+            '#view' is 'height: 1fr', so it already takes whatever the form leaves:
+            a run's output is what needs the room, and the form is what can wait.
+            The run bar stays either way, so Run and the command line stay usable.
+            """
+            self._results_full = full
+            self.query_one("#form").styles.display = "none" if full else "block"
+
+        def action_toggle_results(self) -> None:
+            self._set_results_full(not self._results_full)
 
         async def _render_field(self, form: Vertical, f: tui_form.TuiField) -> None:
             widget_id = self._wid(f"f-{f.key}")
