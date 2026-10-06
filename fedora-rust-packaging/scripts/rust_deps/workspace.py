@@ -274,6 +274,15 @@ def report(manifest: resolver.Manifest, index: fedora.FedoraIndex, local: dict) 
             + (f", replacing the {replaced} source" if replaced else "")
             + ":"
         )
+        # dropping a vendored crate only helps when the build actually reads
+        # vendor/ (a replace-with source) and a Fedora package satisfies what
+        # the workspace asks for; otherwise Cargo would be left without it
+        satisfies = {i.crate for i in found if i.status == "fedora"}
+        asked = {
+            i.crate: i
+            for i in found
+            if i.status not in ("workspace", "path", "git", "alt")
+        }
         drop = 0
         for name, version in vendored:
             have = index.versions(name)
@@ -283,18 +292,37 @@ def report(manifest: resolver.Manifest, index: fedora.FedoraIndex, local: dict) 
                 util.info(
                     f"DROP      {util.ljust_visible(label, 26)}it is a workspace member; vendor/ holds a copy of it"
                 )
-            elif have:
+            elif name in satisfies and replaced:
                 drop += 1
                 util.info(
-                    f"DROP      {util.ljust_visible(label, 26)}Fedora has {', '.join(have[-3:])}: remove it from vendor/ and build against crate({name})"
+                    f"DROP      {util.ljust_visible(label, 26)}Fedora has {', '.join(have[-3:])} and it satisfies the workspace requirement: remove it from vendor/ and build against crate({name})"
+                )
+            elif not replaced:
+                util.info(
+                    f"KEEP      {util.ljust_visible(label, 26)}vendor/ is not configured as a replacement source (.cargo/config.toml has no replace-with): the build does not read this copy"
+                )
+            elif name in asked:
+                item = asked[name]
+                if item.status == "update":
+                    why = f"Fedora has {', '.join(have[-3:])}, which does not satisfy {', '.join(item.reqs)}: update that package, make a compat package, or keep it vendored"
+                elif item.status == "features":
+                    why = f"Fedora has {', '.join(have[-3:])} but not the features the workspace asks for: check its Cargo.toml patch or keep it vendored"
+                elif item.status == "local":
+                    why = "already packaged in the packages root: build against it or keep it vendored"
+                else:
+                    why = "not in Fedora: package it or keep it vendored"
+                util.info(f"KEEP      {util.ljust_visible(label, 26)}{why}")
+            elif have:
+                util.info(
+                    f"KEEP      {util.ljust_visible(label, 26)}Fedora has {', '.join(have[-3:])}, but nothing in the workspace asks for it: the vendored copy is unused"
                 )
             else:
                 util.info(
                     f"KEEP      {util.ljust_visible(label, 26)}not in Fedora: package it or keep it vendored"
                 )
         util.info(
-            f"{drop} of the {len(vendored)} vendored crates are available as packages; "
-            "dropping them makes the build use Fedora's crates."
+            f"{drop} of the {len(vendored)} vendored crates can be dropped; "
+            "the rest are needed by the workspace or not covered by a Fedora package that satisfies it."
         )
     elif counts["new"]:
         util.info("")

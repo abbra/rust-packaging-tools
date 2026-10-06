@@ -677,10 +677,41 @@ def test_vendored_crates_and_the_source_replacement(tmp_path):
     assert rd.workspace.vendored_crates(tmp_path / "nothing") == []
 
 
+def test_vendor_audit_drops_only_replaced_and_satisfying_crates(tmp_path, monkeypatch, capsys):
+    stub_cratesio(monkeypatch, {"old": ["2.0.0"], "lazy": ["3.1.0"]}, {"old": [], "lazy": []})
+    fedora = rd.fedora.FedoraIndex({"serde": {"1.0.200": {""}},  # satisfies ^1.0
+                                    "old": {"1.0.0": {""}},  # does not satisfy ^2.0
+                                    "feat": {"1.0.0": {""}},  # lacks the asked feature
+                                    "unused": {"0.1.0": {""}}})  # nothing asks for it
+    meta = workspace_fixture(tmp_path, {"core": [manifest_dep("serde", "^1.0"),
+                                                 manifest_dep("old", "^2.0"),
+                                                 manifest_dep("feat", "^1.0", features=["derive"])]})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    for name, ver in [("serde", "1.0.200"), ("old", "2.0.0"), ("feat", "1.0.0"), ("unused", "0.1.0")]:
+        d = tmp_path / "vendor" / f"{name}-{ver}"
+        d.mkdir(parents=True)
+        (d / "Cargo.toml").write_text(f'[package]\nname = "{name}"\nversion = "{ver}"\n')
+    # without a replace-with source the build never reads vendor/: nothing is dropped
+    rd.workspace.report(man, fedora, {})
+    out = capsys.readouterr().out
+    assert "DROP" not in out
+    assert "vendor/ is not configured as a replacement source" in out
+    (tmp_path / ".cargo").mkdir()
+    (tmp_path / ".cargo/config.toml").write_text('[source.crates-io]\nreplace-with = "vendored-sources"\n')
+    rd.workspace.report(man, fedora, {})
+    out = capsys.readouterr().out
+    assert "DROP      serde 1.0.200" in out  # Fedora's 1.0.200 satisfies the requirement
+    assert "KEEP      old 2.0.0" in out and "does not satisfy ^2.0" in out
+    assert "KEEP      feat 1.0.0" in out and "not the features the workspace asks for" in out
+    assert "KEEP      unused 0.1.0" in out and "nothing in the workspace asks for it" in out
+    assert "1 of the 4 vendored crates can be dropped" in out
+
+
 def test_parse_workspace_output_rows():
     rows = rd.tui_results.parse_workspace_output([
         "SYSTEM    serde 1.0.229             req ^1.0                <- core",
         "OPTIONAL  libc                      req ^0.2                <- helper",
+        "PATH      other                                       <- core",  # no version, no req
         "            core 1.0.0                crates/core/Cargo.toml",  # a member line
         "SYSTEM: Fedora ships this version: the spec BuildRequires crate(<name>).",  # the legend
         "DROP      serde 1.0.200             Fedora has 1.0.229",  # a vendor audit line
@@ -688,6 +719,7 @@ def test_parse_workspace_output_rows():
     assert [(r["status"], r["crate"], r["version"], r["asked"], r["needed_by"]) for r in rows] == [
         ("SYSTEM", "serde", "1.0.229", "^1.0", "core"),
         ("OPTIONAL", "libc", "", "^0.2", "helper"),
+        ("PATH", "other", "", "", "core"),  # the '<-' is not a version
     ]
 
 
