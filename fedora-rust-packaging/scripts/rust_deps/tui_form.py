@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import argparse
 import collections
+import os
+import re
 
 
 @dataclass
@@ -222,11 +224,32 @@ def tui_argv(fields: list[TuiField], values: dict) -> list[str]:
         elif f.kind == "multi":
             for part in str(v or "").split():
                 if f.positional:
-                    argv.append(part)
+                    argv.append(expand_user_path(part))
                 else:
-                    argv.extend((f.options[0], part))
+                    argv.extend((f.options[0], expand_user_path(part)))
         elif v not in (None, ""):
             if not f.positional:
                 argv.append(f.options[0])
-            argv.append(str(v))
+            argv.append(expand_user_path(str(v)))
     return argv
+
+
+# '~' only means a home directory when it is the whole value or the first path
+# component: a version requirement ('~1.0') or a crate request ('serde@~1.0')
+# starts the same way and must stay exactly as typed.
+_TILDE_PATH = re.compile(r"^~(?:$|/)|^~[^/]+/")
+
+
+def expand_user_path(value: str) -> str:
+    """Expand a '~' the way a shell would.
+
+    A form passes its values straight to a 'rust-deps' subprocess, with no shell
+    between them, so a '~' typed into an input would otherwise reach the command
+    literally and no directory would match it.
+    """
+    if not _TILDE_PATH.match(value):
+        return value
+    try:
+        return os.path.expanduser(value)
+    except KeyError:  # '~someone' that is not an account on this machine
+        return value
