@@ -485,6 +485,30 @@ def test_workspace_root_finds_the_declaration(tmp_path):
     assert rd.resolver.workspace_root(plain) == plain.parent
 
 
+def test_resolve_reports_missing_optional_dependencies_of_a_manifest(tmp_path, monkeypatch, capsys):
+    stub_cratesio(monkeypatch, {"libc": ["0.2.150"]}, {"libc": []})
+    meta = workspace_fixture(tmp_path, {"helper": [manifest_dep("libc", "^0.2", optional=True)]},
+                            features={"helper": {"default": [], "native": ["dep:libc"]}})
+    man = rd.resolver.read_metadata(meta, tmp_path / "Cargo.toml")
+    monkeypatch.setattr(rd.resolver, "read_manifest", lambda path: man)
+    monkeypatch.setattr(rd.fedora, "fedora_index",
+                       lambda refresh=False, chroot=None: rd.fedora.FedoraIndex({}))
+    args = argparse.Namespace(crates=[], manifest=[str(tmp_path / "Cargo.toml")], root=tmp_path,
+                             target=None, ignore_local=False, local_root=None, refresh=False, json=False)
+    rd.resolver.cmd_resolve(args)
+    out = capsys.readouterr().out
+    # reported as an optional entry, naming the feature that would need it
+    assert "OPTIONAL  libc 0.2.150  <- helper (feature 'native')" in out
+    assert "OPTIONAL: only needed when the named feature is enabled" in out
+    # an optional dependency Fedora already ships is not missing
+    monkeypatch.setattr(rd.fedora, "fedora_index",
+                       lambda refresh=False, chroot=None: rd.fedora.FedoraIndex({"libc": {"0.2.150": {""}}}))
+    rd.resolver.cmd_resolve(args)
+    out = capsys.readouterr().out
+    assert "OPTIONAL" not in out
+    assert "Everything is available" in out
+
+
 def test_manifest_file_accepts_a_project_directory(tmp_path, capsys):
     (tmp_path / "Cargo.toml").write_text('[package]\nname = "x"\nversion = "0.1.0"\n')
     assert rd.resolver.manifest_file(tmp_path) == tmp_path / "Cargo.toml"

@@ -348,6 +348,7 @@ def cmd_resolve(args) -> None:
     for extra in args.local_root or []:
         local = {**packages.local_packages(Path(extra)), **local}
     seeds = []
+    manifests = []
     for spec in args.crates:
         name, _, req = spec.partition("@")
         seeds.append((name, req or "*", "(command line)", ["default"]))
@@ -356,9 +357,37 @@ def cmd_resolve(args) -> None:
         if manifest.workspace:
             util.info(manifest.notice())
         seeds += manifest.seeds
-    if not seeds:
+        manifests.append(manifest)
+    if not args.crates and not args.manifest:
         util.die("give crate names and/or --manifest")
     needed = resolve(seeds, index, local)
+    # an optional dependency no enabled feature asks for is not build-required,
+    # but 'resolve --manifest' still reports it when nothing provides it
+    for manifest in manifests:
+        for r in manifest.optional_requirements():
+            if index.best(r.crate, r.req):
+                continue
+            if (
+                r.crate in local
+                and local[r.crate].version
+                and versions.req_matches(r.req, local[r.crate].version)
+            ):
+                continue
+            v = cratesio.pick_version(r.crate, r.req)
+            if v is None:
+                util.warn(f"{r.crate} {r.req}: no matching release on crates.io")
+                continue
+            n = needed.setdefault(
+                f"{r.crate}@{v['num']}",
+                Needed(r.crate, v["num"], "optional", index.versions(r.crate)),
+            )
+            n.reqs.add(r.req)
+            if r.enabled_by:
+                n.needed_by.update(
+                    f"{r.required_by} (feature '{f}')" for f in r.enabled_by
+                )
+            else:
+                n.needed_by.add(r.required_by)
     if args.json:
         print(
             json.dumps(
@@ -379,7 +408,12 @@ def cmd_resolve(args) -> None:
         util.info("Everything is available in Fedora or in the local package tree.")
         return
     for n in needed.values():
-        label = {"new": "NEW", "update": "UPDATE", "features": "FEATURES"}[n.status]
+        label = {
+            "new": "NEW",
+            "update": "UPDATE",
+            "features": "FEATURES",
+            "optional": "OPTIONAL",
+        }[n.status]
         extra = (
             f" (Fedora has {', '.join(n.fedora_versions)})" if n.fedora_versions else ""
         )
@@ -408,3 +442,7 @@ def cmd_resolve(args) -> None:
     util.info(
         "FEATURES: the Fedora package lacks feature subpackages (check its Cargo.toml patch)."
     )
+    if any(n.status == "optional" for n in needed.values()):
+        util.info(
+            "OPTIONAL: only needed when the named feature is enabled; package it if you plan to enable it."
+        )
