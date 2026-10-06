@@ -82,7 +82,10 @@ def tui_line_style(line: str) -> str:
 # of rows would collapse to zero rows while the Buttons beside them keep their
 # three.  Every widget a form mounts therefore states a height, and a row holder
 # is sized from its row count (see _set_rows_height).  The matching CSS rules are
-# in RustDepsTUI.CSS.
+# in RustDepsTUI.CSS.  The other side of the same rule: a container that should
+# hold only its content must say so, because Textual's Horizontal defaults to
+# 'height: 1fr' — the run bar used to take a share of the space the log needed,
+# and the form held its full cap even when it had nothing to show.
 FORM_ROW_HEIGHT = 3
 
 
@@ -142,7 +145,13 @@ def make_tui_app() -> type:
             #work { width: 1fr; }
             #cmd-help { height: auto; max-height: 3; padding: 0 1; }
             #form { height: auto; max-height: 16; }
-            #form-args, #form-options { width: 1fr; padding: 0 1; overflow-y: auto; }
+            #form-args, #form-options {
+                width: 1fr;
+                height: auto;
+                max-height: 16;
+                padding: 0 1;
+                overflow-y: auto;
+            }
             #form .field-label { color: $text-muted; height: 1; }
             #form Input { width: 100%; height: 3; }
             #form Select { width: 100%; height: 3; }
@@ -154,7 +163,7 @@ def make_tui_app() -> type:
             #form .multi-row { width: 100%; height: 3; }
             #form .multi-row Input { width: 1fr; }
             #form .multi-remove { width: 3; min-width: 3; }
-            #runbar { padding: 0 1; }
+            #runbar { height: auto; padding: 0 1; }
             #preview { width: 1fr; }
             #view { height: 1fr; }
             #table { width: 1fr; height: 1fr; }
