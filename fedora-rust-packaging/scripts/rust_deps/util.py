@@ -53,3 +53,13 @@ def die(msg: str) -> None:
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=False, text=True, **kw)
+
+
+# toolbox marks its containers with this file; inside one, running podman shares
+# the host's container storage with an incompatible runroot and corrupts it
+TOOLBOX_MARKER = "/run/.toolboxenv"
+
+
+def in_toolbox() -> bool:
+    """True inside a toolbox container, where podman must not run."""
+    return os.path.exists(TOOLBOX_MARKER)

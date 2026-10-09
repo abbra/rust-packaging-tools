@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import re
+import shlex
 import shutil
 import tomllib
 
@@ -221,33 +222,74 @@ def tmt_image(chroot: str) -> str:
     return f"registry.fedoraproject.org/fedora:{m.group(1)}"
 
 
+def tmt_run_argv(pkg, project: str, chroot: str, *, how_local: bool) -> list[str]:
+    """The tmt command for one package: provision a Fedora container and install
+    the COPR build into it, or (how_local) run against localhost when the
+    throw-away container is itself that environment."""
+    # --how local runs on localhost, which tmt guards behind --feeling-safe; the
+    # throw-away container is that localhost, so running the tests on it is safe
+    safe = ["--feeling-safe"] if how_local else []
+    provision = (
+        ["--how", "local"]
+        if how_local
+        else ["--how", "container", "--image", tmt_image(chroot)]
+    )
+    return [
+        "tmt", *safe, "--root", str(pkg.dir), "run", "--all",
+        "provision", *provision,
+        "prepare", "--insert", "--how", "install", "--order", "30",
+        "--copr", project,
+    ]
+
+
+# the host's trust anchors; the COPR content CDN might use custom CDN with
+# a CA chain the host trusts but a stock Fedora container does not
+CA_ANCHORS = "/etc/pki/ca-trust/source/anchors"
+
+
+def toolbox_escape(argv: list[str], pkg_dir, image: str) -> list[str]:
+    """Run 'argv' on the host in a throw-away container: podman must not run
+    inside a toolbox container (it corrupts the shared container storage), so
+    flatpak-spawn hands the one podman call to the host, and tmt runs against
+    that container (argv built with how_local).  The package directory is bound
+    at its own path (toolbox and host share $HOME), so tmt --root resolves; the
+    host's CA anchors are bound in and extracted so the container trusts what
+    the host trusts (the COPR repository's CA).  label=disable lets the container
+    read those host mounts: relabelling the host's system CA files would be
+    wrong, and the container is a throw-away running the user's own build."""
+    inner = (
+        "update-ca-trust && dnf install -y tmt dnf-plugins-core && " + shlex.join(argv)
+    )
+    return [
+        "flatpak-spawn", "--host",
+        "podman", "run", "--rm",
+        "--security-opt", "label=disable",
+        "-v", f"{pkg_dir}:{pkg_dir}",
+        "-v", f"{CA_ANCHORS}:{CA_ANCHORS}:ro",
+        image,
+        "bash", "-lc", f"set -euo pipefail; {inner}",
+    ]
+
+
 def cmd_tmt(args) -> None:
-    if not shutil.which("tmt"):
+    escape = util.in_toolbox()
+    if escape and not args.host:
+        util.die(
+            "inside a toolbox container, where running podman corrupts its "
+            "container storage; re-run with --host to run the tests on the host "
+            "in a throw-away container, or run outside toolbox"
+        )
+    if escape:
+        if not shutil.which("flatpak-spawn"):
+            util.die("flatpak-spawn is missing; cannot reach the host from toolbox")
+    elif not shutil.which("tmt"):
         util.die("tmt is not installed (dnf install tmt+provision-container)")
     failed = []
     for pkg in packages.select(args.root, args.crates, args.all):
         if not (pkg.dir / "plans" / "rust-deps.fmf").exists():
             write_tmt(pkg)
-        cmd = [
-            "tmt",
-            "--root",
-            str(pkg.dir),
-            "run",
-            "--all",
-            "provision",
-            "--how",
-            "container",
-            "--image",
-            tmt_image(args.chroot),
-            "prepare",
-            "--insert",
-            "--how",
-            "install",
-            "--order",
-            "30",
-            "--copr",
-            args.project,
-        ]
+        argv = tmt_run_argv(pkg, args.project, args.chroot, how_local=escape)
+        cmd = toolbox_escape(argv, pkg.dir, tmt_image(args.chroot)) if escape else argv
         util.info(f"== tmt {pkg.crate}\n$ {' '.join(cmd)}")
         if not args.dry_run and util.run(cmd).returncode:
             failed.append(pkg.crate)

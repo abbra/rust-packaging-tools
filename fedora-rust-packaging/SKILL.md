@@ -218,7 +218,10 @@ Read them as follows (forms can be combined with `--root <dir>`):
      in the package directory). After the COPR builds succeeded, if `tmt` is
      installed, run `$T tmt --all --project <p> -r fedora-<N>-x86_64` (in the
      background) and fix what fails like a build failure. Otherwise say they
-     were not run. On import to dist-git they must be committed too.
+     were not run. Inside a toolbox container `tmt` refuses to run (podman there
+     corrupts the host's container storage); add `--host` to run the tests on
+     the host in a throw-away container instead. On import to dist-git they must
+     be committed too.
 8. **Submit to Fedora** (only when the user wants the packages in Fedora):
    follow "Submitting to Fedora" in `references/MANUAL.md`.
    - Ask for the FAS account name, the COPR project (`owner/project`), and
