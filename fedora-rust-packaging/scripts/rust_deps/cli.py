@@ -388,6 +388,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="fedora-rawhide-x86_64",
         help="Fedora chroot whose release the container runs (default %(default)s)",
     )
+    sp.add_argument(
+        "--host",
+        action="store_true",
+        help="inside a toolbox container, run the tests on the host in a "
+        "throw-away container (podman must not run inside toolbox)",
+    )
     sp.add_argument("-n", "--dry-run", action="store_true")
     sp.set_defaults(func=tmt.cmd_tmt)
 

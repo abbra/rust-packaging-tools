@@ -185,7 +185,7 @@ graph at `regen`.
 | `check-targets CRATE…\|--all (-r CHROOT…\|--project P) [-q] [--refresh]` | Read-only; no COPR build needed. For each package and target release (the `-r` chroots, or all chroots of the COPR project; `targets.toml` respected), generate the BuildRequires as rust2rpm does (`cargo2rpm buildrequires` with the spec's feature flags, dev-dependencies unless `%check` is off) and check each: a local package built for that target, with the version and the features asked for, or the target's repositories. Also checks that each feature subpackage could be installed: every `dep/feature` a feature refers to must exist in the target, or in the local package (a feature dropped from a local dependency must be dropped from its dependents too). Notes where a local package shadows other versions the target ships. Fails if anything would not resolve. See "COPR build failures". |
 | `copr-status CRATE…\|--all --project P [-r CHROOT]… [--json] [--refresh] [--wait [--interval S]]` | Read-only. For the latest COPR build of each package's current version, show every chroot's result, and for each failure the reason from the build log: each missing BuildRequires, checked against the local packages and their builds and against the target's repositories, or the compile and test errors. Ends with the next steps. Logs are cached in `~/.cache/rust-packaging-tools/copr-logs/`. For build errors it prints the `copr-log` and `mock-chain` commands to look closer. `--wait` polls until nothing is building (run it in the background). See "COPR build failures". |
 | `copr-log CRATE -r CHROOT --project P [--grep RE \| --tail N] [--errors N]` | Read-only. Fetch the log of the newest build of the package's current version in that chroot (a running build's live log too) and summarize it: missing BuildRequires, error lines, and warnings grouped, each known one explained (see "Reading a build log"). `--grep` and `--tail` print log lines instead. |
-| `tmt CRATE…\|--all --project P [-r CHROOT] [-n]` | Run the package's generated tmt tests (see "tmt tests") in a container of that Fedora release (default `fedora-rawhide-x86_64`), with the COPR project's repository enabled, as Fedora CI will run them in dist-git. Needs `tmt` with container provisioning (`dnf install tmt+provision-container`) and podman. |
+| `tmt CRATE…\|--all --project P [-r CHROOT] [--host] [-n]` | Run the package's generated tmt tests (see "tmt tests") in a container of that Fedora release (default `fedora-rawhide-x86_64`), with the COPR project's repository enabled, as Fedora CI will run them in dist-git. Needs `tmt` with container provisioning (`dnf install tmt+provision-container`) and podman. Inside a toolbox container it refuses to run (podman there corrupts the shared container storage); `--host` instead runs the tests on the host in a throw-away container via `flatpak-spawn` (see "tmt tests"). |
 | `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
 | `adopt CRATE…\|--all [--branch B] [--mark-only] [-n]` | For packages that are in Fedora (`--all`: those whose package exists in dist-git): take over the dist-git packaging (`rust2rpm.toml`, patches, hand-made `fix-metadata.diff`) at the branch's current commit, regenerate at the newer of Fedora's and the local version, and write `dist-git.toml`. The earlier configuration moves to `.rust-deps-backup/`. With `--mark-only` (or when dist-git has no `rust2rpm.toml`), keep the local packaging and only write `dist-git.toml`. See "Packages that are in Fedora". |
 | `dist-git CRATE…\|--all [--dir DIR] [--branch B] [--push] [-n]` | For adopted packages whose version here is newer than dist-git's: clone (or fetch) the package's dist-git repository into DIR (`--dir`, else `$RUST_DEPS_DIST_GIT`), check that the branch (by default, the one recorded in each package's `dist-git.toml`; `--branch B` overrides it) is still at the commit `adopt` took, and commit the update on a local branch `update-<version>`: the spec, `rust2rpm.toml`, patches, local sources and the tmt tests, with the URL sources in `sources` (`fedpkg new-sources --offline`). The commit message is the `%autochangelog` entry. Nothing leaves the machine. With `--push`, fork the repository (`fedpkg fork`), upload the sources to the lookaside cache and push the branch to the fork; it prints the URL that opens the pull request. See "Dist-git updates". |
@@ -623,6 +623,23 @@ Run them before import, against the COPR builds:
 
 ```
 $T tmt --all --project user/project -r fedora-45-x86_64
+```
+
+`tmt` provisions a container with podman.  Inside a toolbox container, running
+podman shares the host's container storage with an incompatible runroot and
+corrupts it (nothing runs until the next reboot), so `tmt` refuses there.  Pass
+`--host` to run on the host instead: `flatpak-spawn` hands the one podman call
+to the host, which starts a throw-away Fedora container of the chroot's
+release; `tmt` runs the tests against that container (`--how local`, which it
+guards behind `--feeling-safe` — safe here, the container is disposable),
+installs the COPR build into it, and the `--rm` container is discarded
+afterwards.  The host's CA trust anchors are bound in (the COPR content may be
+served from a custom CDN which would require host-specific CA chains).
+The container runs with SELinux labelling disabled so it may read host's CA
+chains.  No podman ever runs inside toolbox.
+
+```
+$T tmt --all --project user/project -r fedora-45-x86_64 --host   # from a toolbox container
 ```
 
 When the package is imported, commit `.fmf/`, `plans/` and `tests/` to

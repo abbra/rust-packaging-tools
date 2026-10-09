@@ -932,6 +932,106 @@ def test_tmt_image(chroot, image):
     assert rd.tmt.tmt_image(chroot) == image
 
 
+# ─── tmt inside a toolbox container ──────────────────────────────────────────
+
+def test_in_toolbox_detects_the_marker(tmp_path, monkeypatch):
+    marker = tmp_path / "toolboxenv"
+    monkeypatch.setattr(rd.util, "TOOLBOX_MARKER", str(marker))
+    assert not rd.util.in_toolbox()
+    marker.write_text("")
+    assert rd.util.in_toolbox()
+
+
+def test_tmt_run_argv_provisions_a_container_by_default(tmp_path):
+    pkg = rd.packages.LocalPackage("zmij", tmp_path, "1.0.23")
+    argv = rd.tmt.tmt_run_argv(pkg, "u/p", "fedora-45-x86_64", how_local=False)
+    assert argv == ["tmt", "--root", str(tmp_path), "run", "--all",
+                    "provision", "--how", "container",
+                    "--image", "registry.fedoraproject.org/fedora:45",
+                    "prepare", "--insert", "--how", "install", "--order", "30",
+                    "--copr", "u/p"]
+    assert "--feeling-safe" not in argv  # provisioning a container needs no such opt-in
+
+
+def test_tmt_run_argv_runs_locally_when_the_container_is_the_env(tmp_path):
+    pkg = rd.packages.LocalPackage("zmij", tmp_path, "1.0.23")
+    argv = rd.tmt.tmt_run_argv(pkg, "u/p", "fedora-45-x86_64", how_local=True)
+    assert "--image" not in argv  # tmt does not provision; the throw-away container is the env
+    # --how local runs on localhost, which tmt guards behind --feeling-safe (safe here: a
+    # throw-away container); the opt-in is a tmt-level option, before 'run'
+    assert argv[:10] == ["tmt", "--feeling-safe", "--root", str(tmp_path), "run", "--all",
+                         "provision", "--how", "local", "prepare"]
+    assert argv[-2:] == ["--copr", "u/p"]
+
+
+def test_toolbox_escape_runs_tmt_on_the_host_in_a_throwaway_container(tmp_path):
+    argv = ["tmt", "--root", str(tmp_path), "run"]
+    cmd = rd.tmt.toolbox_escape(argv, tmp_path, "registry.fedoraproject.org/fedora:45")
+    assert cmd[:5] == ["flatpak-spawn", "--host", "podman", "run", "--rm"]
+    # label=disable so the container may read the host mounts under SELinux (relabelling the
+    # host's system CA files would be wrong)
+    assert "--security-opt" in cmd and "label=disable" in cmd
+    assert f"{tmp_path}:{tmp_path}" in cmd            # the package dir, at its own path
+    # the host's CA anchors, so the container trusts what the host trusts (the COPR repo's CA)
+    assert "/etc/pki/ca-trust/source/anchors:/etc/pki/ca-trust/source/anchors:ro" in cmd
+    assert "registry.fedoraproject.org/fedora:45" in cmd
+    assert cmd[-3] == "bash" and cmd[-2] == "-lc"
+    inner = cmd[-1]
+    assert "update-ca-trust" in inner                # extract the mounted anchors first
+    assert "dnf install -y tmt" in inner             # tmt installed in the throw-away container
+    assert " ".join(argv) in inner                   # then the tmt command runs
+
+
+def _tmt_args(tmp_path, **kw):
+    base = dict(root=tmp_path, crates=["zmij"], all=False, project="u/p",
+                chroot="fedora-45-x86_64", dry_run=True, host=False)
+    return argparse.Namespace(**{**base, **kw})
+
+
+def _staged_package(tmp_path):
+    pkg_dir = make_package(tmp_path, "zmij", "rust-zmij", "1.0.23")
+    (pkg_dir / "plans").mkdir()
+    (pkg_dir / "plans" / "rust-deps.fmf").write_text("")  # so cmd_tmt does not (re)write the tmt files
+    return pkg_dir
+
+
+def test_cmd_tmt_refuses_a_toolbox_without_host(tmp_path, monkeypatch, capsys):
+    _staged_package(tmp_path)
+    monkeypatch.setattr(rd.util, "in_toolbox", lambda: True)
+    with pytest.raises(SystemExit):
+        rd.tmt.cmd_tmt(_tmt_args(tmp_path, host=False))
+    assert "--host" in capsys.readouterr().err
+
+
+def test_cmd_tmt_escapes_a_toolbox_with_host(tmp_path, monkeypatch):
+    _staged_package(tmp_path)
+    monkeypatch.setattr(rd.util, "in_toolbox", lambda: True)
+    monkeypatch.setattr(rd.tmt.shutil, "which", lambda tool: "/usr/bin/" + tool)
+    captured = []
+    monkeypatch.setattr(rd.util, "run",
+                        lambda cmd, **kw: captured.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    rd.tmt.cmd_tmt(_tmt_args(tmp_path, host=True, dry_run=False))
+    assert captured and captured[0][:4] == ["flatpak-spawn", "--host", "podman", "run"]
+    assert "provision --how local" in captured[0][-1]  # local provisioning inside the throw-away container
+
+
+def test_cmd_tmt_runs_directly_outside_a_toolbox(tmp_path, monkeypatch):
+    _staged_package(tmp_path)
+    monkeypatch.setattr(rd.util, "in_toolbox", lambda: False)
+    monkeypatch.setattr(rd.tmt.shutil, "which", lambda tool: "/usr/bin/" + tool)
+    captured = []
+    monkeypatch.setattr(rd.util, "run",
+                        lambda cmd, **kw: captured.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    rd.tmt.cmd_tmt(_tmt_args(tmp_path, host=False, dry_run=False))
+    assert captured[0][0] == "tmt" and "container" in captured[0]
+
+
+def test_tmt_tui_form_offers_the_host_flag():
+    fields = rd.tui_form.tui_fields(_subcommand_parsers()["tmt"])
+    host = next(f for f in fields if f.dest == "host")
+    assert host.kind == "flag" and "--host" in host.options
+
+
 # ─── review plan ────────────────────────────────────────────────────────────
 
 def test_review_plan(tmp_path, monkeypatch):
