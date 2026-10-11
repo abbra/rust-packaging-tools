@@ -70,79 +70,100 @@ def tests_todo_crates(root: Path) -> list[str]:
 @dataclass
 class TuiStage:
     """One position of a package on the lifecycle graph: 'detect' is local file
-    state, 'edges' are the commands that move a package out of this stage
-    (command, flag field keys to pre-check, why)."""
+    state, 'action' the key of the tui_actions verb that moves a package out of
+    this stage, 'label' and 'blurb' what the board shows a packager."""
 
     name: str
     detect: Callable[[packages.LocalPackage], bool]
-    edges: list[tuple[str, list[str], str]]
+    action: str
+    label: str
+    blurb: str
 
 
 # The Quick start pipeline as data.  First matching stage wins, so a package is
-# suggested exactly the work that comes next for it; the build line (spec,
+# placed where the work that comes next for it is; the build line (spec,
 # tests, SRPM) is shared, and after it the tree branches: adopted packages go
 # on to dist-git, target-limited ones to COPR, everything else onto the review
-# line (review-plan → draft → filed).  The 'tests?' stage expands into the
-# discovery chain that tui_trial_actions derives from a trial run's output.
+# line (review → draft → filed).
 TUI_STAGES = [
     TuiStage(
         "spec?",
         lambda p: not p.version,
-        [("regen", [], "no generated spec for these packages")],
+        "regen",
+        "Needs a spec",
+        "No spec generated yet: rust2rpm writes it from rust2rpm.toml.",
     ),
     TuiStage(
         "tests?",
         lambda p: not has_tests(p),
-        [
-            (
-                "trial",
-                ["discover"],
-                "no [tests] in rust2rpm.toml: trial --discover picks what can run",
-            )
-        ],
+        "choose-tests",
+        "Choose tests",
+        "No [tests] table yet: find which test targets can run in mock.",
     ),
     TuiStage(
         "tests-todo",
         has_tests_todo,
-        [
-            (
-                "tests-edit",
-                [],
-                "the [tests] table still has TODO reasons: write the real ones",
-            )
-        ],
+        "explain-skips",
+        "Explain test skips",
+        "The [tests] table skips some targets: write down why, in place of the TODOs.",
     ),
     TuiStage(
         "srpm?",
         lambda p: not has_srpm(p),
-        [("srpm", [], "no SRPM built for the current version")],
+        "srpm",
+        "Build SRPM",
+        "No source RPM of the current version: build it, check %prep and rpmlint.",
     ),
     TuiStage(
         "adopted",
         lambda p: p.dist_git is not None,
-        [("dist-git", [], "adopted from dist-git: prepare the update commit")],
+        "dist-git",
+        "Update in dist-git",
+        "Fedora already has these: prepare the update commit for dist-git.",
     ),
     TuiStage(
         "targets",
         lambda p: p.targets is not None,
-        [("copr", [], "limited to targets.toml: publish builds for those releases")],
+        "copr",
+        "Publish to COPR",
+        "Built only for the releases in targets.toml: publish them in COPR.",
     ),
     TuiStage(
         "filed",
         lambda p: (p.dir / reviewrequest.REQUEST_STATE).exists(),
-        [("review-status", [], "the ticket is filed: see where it stands")],
+        "review-status",
+        "Filed, in review",
+        "The review request is on Bugzilla: see where it stands.",
     ),
     TuiStage(
         "draft",
         lambda p: (p.dir / reviewrequest.REQUEST_DRAFT).exists(),
-        [("review-request", ["file"], "the draft is ready: file it on Bugzilla")],
+        "file-request",
+        "Draft ready to file",
+        "The review request is drafted: file it on Bugzilla.",
     ),
     TuiStage(
         "review",
         lambda p: True,
-        [("review-plan", [], "what to submit for review, in which order")],
+        "review-plan",
+        "Ready for review",
+        "Built and tested: plan what to submit for review, in which order.",
     ),
 ]
+
+# The board lists the stages in pipeline order, not in detection order.
+BOARD_ORDER = [
+    "spec?",
+    "tests?",
+    "tests-todo",
+    "srpm?",
+    "review",
+    "draft",
+    "filed",
+    "adopted",
+    "targets",
+]
+STAGES = {s.name: s for s in TUI_STAGES}
 
 
 def tui_stage(pkg: packages.LocalPackage) -> TuiStage:
@@ -153,61 +174,47 @@ def tui_stage(pkg: packages.LocalPackage) -> TuiStage:
     return TUI_STAGES[-1]  # 'review' matches everything
 
 
-def tui_package_rows(root: Path) -> tuple[list[str], list[list[str]]]:
-    """The Overview table: what each package under the root actually has and
-    where it sits on the lifecycle graph."""
-    headers = ["crate", "version", "spec", "patch", "srpm", "tests", "stage", "scope"]
-    rows = []
+def board(root: Path) -> dict[str, list[packages.LocalPackage]]:
+    """Every stage in pipeline order with the packages it holds, empty ones included."""
+    out: dict[str, list[packages.LocalPackage]] = {name: [] for name in BOARD_ORDER}
     for pkg in _overview_packages(root):
-        rows.append(
-            [
-                pkg.crate + (" (compat)" if pkg.compat else ""),
-                pkg.version or "-",
-                "yes" if pkg.version else "-",
-                "yes" if (pkg.dir / f"{pkg.crate}-fix-metadata.diff").exists() else "-",
-                "yes" if has_srpm(pkg) else "-",
-                "yes" if has_tests(pkg) else "-",
-                tui_stage(pkg).name,
-                pkg.scope,
-            ]
-        )
-    return headers, rows
+        out[tui_stage(pkg).name].append(pkg)
+    return out
 
 
-def tui_suggestions(
-    root: Path,
-) -> list[tuple[str, list[str], list[str], dict[str, str], str]]:
-    """Next steps implied by the tree state: (command, crates to preselect,
-    flag field keys to pre-check, option values to prefill, why).
-    Derived from the lifecycle graph: every package is placed on a stage, and
-    each reached stage yields its edges with those crates picked.  Everything
-    here is local."""
-    pkgs = _overview_packages(root)
-    if not pkgs:
-        return [
-            (
-                "resolve",
-                [],
-                [],
-                {},
-                "nothing under this root yet: find the crates a project needs",
-            ),
-            ("init", [], [], {}, "or create packages directly"),
-        ]
-    at: dict[str, list[str]] = {}
-    for p in pkgs:
-        at.setdefault(tui_stage(p).name, []).append(p.crate)
-    out: list[tuple[str, list[str], list[str], dict[str, str], str]] = []
-    for stage in TUI_STAGES:
-        crates = at.get(stage.name)
-        if not crates:
-            continue
-        for cmd, flags, why in stage.edges:
-            out.append((cmd, crates, flags, {}, f"{stage.name}: {why}"))
-    if any(has_srpm(p) for p in pkgs):
-        out.append(
-            ("status", [], [], {}, "packaged vs. crates.io vs. the Fedora releases")
-        )
+def package_checklist(pkg: packages.LocalPackage) -> list[tuple[str, str]]:
+    """What one package has, as (mark, text): '✓' done, '✗' the step it is at,
+    '·' not reached yet, '–' nothing to do.  Local files only, like the stages."""
+    stage = tui_stage(pkg).name
+    patch = pkg.dir / f"{pkg.crate}-fix-metadata.diff"
+    todo = has_tests_todo(pkg)
+    items = [
+        (bool(pkg.version), "spec?", "spec generated"),
+        (
+            patch.exists() or None,
+            "",
+            "Cargo.toml patch" if patch.exists() else "no Cargo.toml patch",
+        ),
+        (has_tests(pkg), "tests?", "tests chosen"),
+        (has_tests(pkg) and not todo, "tests-todo", "test skips explained"),
+        (has_srpm(pkg), "srpm?", f"SRPM {pkg.version or ''}".strip()),
+    ]
+    if pkg.dist_git is not None:
+        items.append((False, "adopted", "dist-git update"))
+    elif pkg.targets is not None:
+        items.append((False, "targets", "COPR build"))
+    else:
+        draft = (pkg.dir / reviewrequest.REQUEST_DRAFT).exists()
+        filed = (pkg.dir / reviewrequest.REQUEST_STATE).exists()
+        items.append((draft or filed, "review", "review request drafted"))
+        items.append((filed, "draft", "review request filed"))
+    out = []
+    for done, at, text in items:
+        if done is None:
+            mark = "–"
+        else:
+            mark = "✓" if done else ("✗" if at == stage else "·")
+        out.append((mark, text))
     return out
 
 

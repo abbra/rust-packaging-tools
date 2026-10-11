@@ -47,6 +47,7 @@ from . import (
     targets,
     tmt,
     trial,
+    tui_actions,
     tui_app,
     tui_form,
     tui_overview,
