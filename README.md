@@ -107,57 +107,27 @@ rust-deps review-status --all                   # reviewer comments, next steps
 rust-deps status --project username/repo        # packaged vs. crates.io vs. each Fedora/EPEL release
 rust-deps update native-ossl-sys native-ossl --version 0.3.1   # to a new upstream release, in build order
 rust-deps review-status --user username              # all your review tickets, tracked in ~/.cache
-rust-deps tui                                        # all of the above in a text UI (python3-textual)
+rust-deps tui                                        # a guided text UI over all of the above (python3-textual)
 ```
 
-`rust-deps tui` opens the whole tool in a terminal UI (built with
-[Textual](https://github.com/Textualize/textual)): a sidebar lists every
-command in workflow order — dimmed when a `doctor` probe finds the tool it
-needs missing — and it opens on an **Overview**: every package
-under the root with its stage on the packaging lifecycle graph (spec → tests
-→ tests reasons → SRPM → review → draft → filed, with the adopted and
-target-limited branches), and the next step the graph implies for each —
-selecting one jumps
-to that command with the right crates already picked. The Overview refreshes
-after every run.
-The form for the selected command is built from the same argparse metadata as
-`--help` (so the UI and the command line can never drift apart), rendered as
-what the parser says it is, in two columns: what the command acts on on the
-left — the crate selection as a list of checkboxes over the packages under
-`--root` plus a field for new `CRATE[@REQ]` names, or a positional argument
-such as `workspace`'s `DIR|Cargo.toml` rows — and every option a readable row
-of its own on the right (flags with a short form of their `--help` inline), so
-a long list never hides the options;
-mutually exclusive options (`regen --latest/--version/--crate-file`,
-`--compat/--no-compat`) are one mode choice, repeatable options (`-r`,
-`--manifest`, `--koji-task`, …) are add/remove rows, and required arguments
-gate the Run button. A `~` typed into a path is expanded as a shell would
-expand it, since the command runs as a subprocess with no shell in between.
-The exact `rust-deps …` command line is shown live as
-you fill the form. Output streams into the view — diagnostics colored; each
-command's result renders per a declared playbook: verdict tables (`status`,
-`doctor`, `trial`, `srpm`), the review-plan board, stage ladders for `order`,
-`mock-chain` and `copr`, `copr-status` per-chroot verdicts, and any `--json`
-result as a table; a run whose output has no table shape stays in the Log
-view.
-Results feed back into the UI: a `trial` run becomes a verdict table (crate,
-target, status, summary, first error) with next steps under it, following the
-discovery workflow: plain failures go to `--discover`, a suggested `[tests]`
-table goes to `--discover --apply` (write, regenerate, recheck), a passing
-recheck opens the **reason editor** (`tests-edit`): one editable row per TODO
-comment, saving rewrites only the `comments` array of the `[tests]` section
-and then offers `regen` → `srpm`; passing crates go to `srpm` — selecting one
-reopens that command with the crates already picked, the suggested flags set,
-and the values the previous run established carried over (the COPR project,
-the target chroot). The same applies to what any other command proposes in
-its own output: review-plan's `run 'review' first`
-on a NOT READY package, `resolve`'s new crates going to `init --recursive`,
-an `update -n` plan going to the apply, review-status' `next:` lines, and
-copr-status' resubmit and log commands all become jumps with the right
-crates, flags and values filled in. Keys:
-arrows/enter pick a command or a suggested next step, `tab` moves through the
-form, `ctrl+r` runs, `escape` cancels, `ctrl+f` gives the log or table the
-whole screen, `ctrl+q` quits.
+`rust-deps tui` is a terminal UI (built with
+[Textual](https://github.com/Textualize/textual)) that walks a packager
+through the lifecycle instead of listing commands. It opens on a **board**:
+the stages a package goes through — *Needs a spec*, *Choose tests*, *Explain
+test skips*, *Build SRPM*, *Ready for review*, *Draft ready to file*, *Filed,
+in review*, and the *Update in dist-git* and *Publish to COPR* branches — each
+with the packages it holds and the one action that moves them on. Pick
+packages with `space` and press `enter`: an **action sheet** shows the few
+inputs that matter, filled from **Settings** asked once per root (COPR
+project, chroots, FAS account; kept in `~/.cache/rust-packaging-tools`),
+everything else folded under *More options*, and the exact `rust-deps …`
+line it runs. The **run view** streams the log, then sums it up: the verdict,
+every `ACTION NEEDED` left to fix by hand, the result as a table, and the next
+steps — the ones the tool's own output proposes and the ones the packages'
+new stages imply. `d` shows one package's checklist and its next step, `o`
+the other actions that fit, `n` starts something new from crate names or a
+project path, and `?` lists every command with all its options (forms
+generated from the same argparse metadata as `--help`).
 
 The full workflow and reference is in
 [`fedora-rust-packaging/references/MANUAL.md`](fedora-rust-packaging/references/MANUAL.md).
