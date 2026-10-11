@@ -293,7 +293,13 @@ def trial(
     if not broken and not failing:
         util.info("   all test targets pass; no [tests] restrictions needed")
         if apply:
-            write_tests_table(pkg, None)
+            # 'run = true' is rust2rpm's default, so the spec does not change; the
+            # table records that the tests were checked (the TUI's "Choose tests"
+            # stage is "no [tests] table yet")
+            write_tests_table(pkg, ALL_PASS_TABLE)
+            util.info(
+                f"Written to {pkg.config_file}: every test target runs (run = true)."
+            )
         return True
 
     # suggestion: drop broken targets; skip a few failing tests, drop the rest
@@ -341,13 +347,21 @@ def trial(
     return True
 
 
+# what discovery writes when every test target passes: rust2rpm's defaults, said out loud
+ALL_PASS_TABLE = {"run": True, "skip": {}, "comments": []}
+
+
 def render_tests_table(table: dict) -> str:
     out = ["[tests]"]
     run_ = table["run"]
     out.append(
         "run = false"
         if run_ is False
-        else f"run = [{', '.join(pkginit.toml_str(r) for r in run_)}]"
+        else (
+            "run = true"
+            if run_ is True
+            else f"run = [{', '.join(pkginit.toml_str(r) for r in run_)}]"
+        )
     )
     if table["skip"]:
         for t, names in table["skip"].items():
@@ -356,15 +370,16 @@ def render_tests_table(table: dict) -> str:
             )
         for t in table["skip"]:
             out.append(f"skip-exact.{pkginit.toml_str(t) if ':' in t else t} = true")
+    # rust2rpm's schema requires 'comments' in [tests], even an empty one
     out.append(f"comments = {pkginit.toml_list(table['comments'])}")
     return "\n".join(out) + "\n"
 
 
-def write_tests_table(pkg: packages.LocalPackage, table: dict | None) -> None:
+def write_tests_table(pkg: packages.LocalPackage, table: dict) -> None:
+    """Replace the [tests] table of rust2rpm.toml; the rest stays as it is."""
     text = pkg.config_file.read_text()
     text = re.sub(r"(?ms)^\[tests\]\n.*?(?=^\[|\Z)", "", text).rstrip("\n") + "\n"
-    if table is not None:
-        text += "\n" + render_tests_table(table)
+    text += "\n" + render_tests_table(table)
     pkg.config_file.write_text(text)
 
 

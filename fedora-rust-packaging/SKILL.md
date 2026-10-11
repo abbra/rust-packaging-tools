@@ -137,7 +137,9 @@ Read them as follows (forms can be combined with `--root <dir>`):
      was changed and why.
    - `$T regen <crate>`
 4. **Tests**, for each package:
-   - `$T trial --discover --apply <crate>`
+   - `$T trial --discover --apply <crate>`; when every target passes it
+     writes `[tests] run = true` with `comments = []` (the spec stays the same),
+     which records that the tests were checked.
    - Inspect the log it names (`~/.cache/rust-packaging-tools/trial/<crate>.log`)
      to learn *why* each target fails.
    - Write the reasons into `[tests] comments`.
