@@ -143,7 +143,7 @@ resolve → init ─→ package dir ─→ regen ─→ spec ─→ trial --disc
 | stage | on the TUI board | the local state that puts a package here | the edge out of it |
 |---|---|---|---|
 | `spec?` | Needs a spec | no generated spec | `regen` |
-| `tests?` | Choose tests | no `[tests]` in rust2rpm.toml | `trial --discover` |
+| `tests?` | Choose tests | no `[tests]` in rust2rpm.toml | `trial --discover`, then `--apply` (writes the suggested table, or `run = true` when every target passes) |
 | `tests-todo` | Explain test skips | `[tests]` written by discovery, comments still TODOs | the TUI reason editor, or `$EDITOR`; then `regen` |
 | `srpm?` | Build SRPM | no SRPM of the current version | `srpm` |
 | `adopted` | Update in dist-git | `dist-git.toml` (Fedora already has the package) | `dist-git` |
@@ -274,7 +274,8 @@ end, not a second implementation.
   touched package's new stage implies.  For example:
   - a `trial` run: failures → *Choose tests*, a suggested `[tests]` table →
     *Write the [tests] table*, an applied table that passes → *Explain test
-    skips*, all targets passing → *Build SRPM*;
+    skips*, a discovery where every target passes → *Write the [tests] table*
+    (it records `run = true`), all targets passing otherwise → *Build SRPM*;
   - `resolve` or `workspace`: the NEW crates → *Create packages*
     (`init --recursive`, pinned to the versions the run identified);
   - `review-plan`'s `run 'review' first`, review-status' `next:` lines,

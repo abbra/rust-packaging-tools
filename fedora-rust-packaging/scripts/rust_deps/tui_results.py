@@ -55,7 +55,9 @@ def parse_trial_output(lines: list[str]) -> list[dict]:
             or "no [tests] restrictions needed" in line
         ):
             cur["suggested"] = True
-        elif "Written to " in line and "regenerating the spec" in line:
+        elif "Written to " in line and (
+            "regenerating the spec" in line or "every test target runs" in line
+        ):
             cur["applied"] = True
     rows: list[dict] = []
     for b in blocks:
@@ -85,9 +87,16 @@ def tui_trial_actions(
     crate decides: --apply chains a recheck after writing the suggested table."""
     last: dict[str, dict] = {}
     for r in rows:
-        blk = last.setdefault(r["crate"], {"mode": "plain", "failed": [], "log": ""})
+        blk = last.setdefault(
+            r["crate"], {"mode": "plain", "failed": [], "log": "", "applied": False}
+        )
         if r["log"] != blk["log"]:
-            blk = {"mode": r["mode"], "failed": [], "log": r["log"]}
+            blk = {
+                "mode": r["mode"],
+                "failed": [],
+                "log": r["log"],
+                "applied": r["applied"],
+            }
             last[r["crate"]] = blk
         if r["status"] in ("FAILED", "BROKEN"):
             blk["failed"].append(r["target"])
@@ -137,7 +146,25 @@ def tui_trial_actions(
                 "the applied table passes: write the real reasons into rust2rpm.toml, then regen",
             )
         )
-    if s := group(lambda b: not b["failed"] and b["mode"] != "recheck"):
+
+    # a discovery where everything passes suggests no table; --apply records that
+    # the tests were checked ('run = true', the spec does not change)
+    def unrecorded(b: dict) -> bool:
+        return b["mode"] == "discover" and not b["applied"]
+
+    if s := group(lambda b: not b["failed"] and unrecorded(b)):
+        out.append(
+            (
+                "trial",
+                s,
+                ["discover", "apply"],
+                {},
+                "every test target passes: --apply records it in rust2rpm.toml (run = true)",
+            )
+        )
+    if s := group(
+        lambda b: not b["failed"] and b["mode"] != "recheck" and not unrecorded(b)
+    ):
         out.append(("srpm", s, [], {}, "all their test targets pass: build the SRPMs"))
     return out
 
