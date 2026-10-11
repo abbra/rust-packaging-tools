@@ -1406,6 +1406,22 @@ def test_trial_records_an_all_passing_discovery(tmp_path):
     assert rd.tui_overview.tui_stage(pkg).name == "srpm?"
 
 
+def test_tui_trial_actions_record_an_all_passing_discovery():
+    found = rd.tui_results.parse_trial_output([
+        "== trial a 1.0 (log: /l/a.log)", "   lib                      ok      2 passed, 0 failed",
+        "   all test targets pass; no [tests] restrictions needed",
+    ])
+    assert [(c, cr, fl) for c, cr, fl, _, _ in rd.tui_results.tui_trial_actions(found)] == [
+        ("trial", ["a"], ["discover", "apply"])]
+    recorded = rd.tui_results.parse_trial_output([
+        "== trial a 1.0 (log: /l/a.log)", "   lib                      ok      2 passed, 0 failed",
+        "   all test targets pass; no [tests] restrictions needed",
+        "Written to /r/a/rust2rpm.toml: every test target runs (run = true).",
+    ])
+    assert [(c, cr, fl) for c, cr, fl, _, _ in rd.tui_results.tui_trial_actions(recorded)] == [
+        ("srpm", ["a"], [])]
+
+
 def test_tui_trial_actions_turns_verdicts_into_next_steps():
     rows = rd.tui_results.parse_trial_output([
         "== trial a 1.0 (log: /l/a.log)", "   all                      ok      2 passed, 0 failed",
