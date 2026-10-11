@@ -2190,11 +2190,14 @@ def test_tui_app_gates_actions_on_missing_tools(tmp_path, tui_cache, monkeypatch
     asyncio.run(drive())
 
 
-def test_tui_app_sheet_folds_options_and_gates_on_required(tmp_path, tui_cache):
+def test_tui_app_sheet_folds_options_and_gates_on_required(tmp_path, tui_cache, monkeypatch):
     pytest.importorskip("textual")
     from textual.widgets import Collapsible, Input, Select
     app_class = rd.tui_app.make_tui_app()
     make_package(tmp_path, "a", "rust-a", "0.1.0")
+    # Run is gated on the required inputs alone here: a host without copr-cli
+    # (the CI container) would also gate it on the missing tool
+    monkeypatch.setattr(rd.tui_results, "parse_tool_states", lambda lines: {})
 
     async def drive():
         app = app_class(tmp_path)
