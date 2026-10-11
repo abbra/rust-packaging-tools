@@ -84,7 +84,6 @@ def test_chroot_metalinks_unknown():
         rd.fedora.chroot_metalinks("opensuse-tumbleweed-x86_64")
 
 
-
 # ─── status columns ─────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("target, chroot", [
@@ -1077,7 +1076,6 @@ def test_review_plan(tmp_path, monkeypatch):
     assert [i.state for s in plan for i in s if i.pkg.crate == "synta-derive"] == ["not-ready"]
 
 
-
 # ─── adopted from Fedora's dist-git ─────────────────────────────────────────
 
 def test_dist_git_files():
@@ -1493,18 +1491,6 @@ def test_parse_srpm_output_reads_srpm_blocks():
     assert rd.tui_results.parse_srpm_output(["no blocks here"]) == []
 
 
-def test_tui_package_rows_reports_tree_state(tmp_path):
-    make_package(tmp_path, "a", "rust-a", "0.1.0")
-    make_package(tmp_path, "b", "rust-b", "0.2.0")
-    (tmp_path / "b" / "rust2rpm.toml").write_text("[tests]\n")
-    (tmp_path / "b" / "b-fix-metadata.diff").write_text("x")
-    (tmp_path / "b" / "rust-b-0.2.0-1.fc45.src.rpm").write_text("")
-    headers, rows = rd.tui_overview.tui_package_rows(tmp_path)
-    assert headers == ["crate", "version", "spec", "patch", "srpm", "tests", "stage", "scope"]
-    assert rows[0] == ["a", "0.1.0", "yes", "-", "-", "-", "tests?", "everywhere"]
-    assert rows[1] == ["b", "0.2.0", "yes", "yes", "yes", "yes", "review", "everywhere"]
-
-
 def test_tui_stage_follows_the_lifecycle_graph(tmp_path):
     make_package(tmp_path, "a", "rust-a", "0.1.0")
     pkg = rd.packages.local_packages(tmp_path)["a"]
@@ -1527,38 +1513,6 @@ def test_tui_stage_follows_the_lifecycle_graph(tmp_path):
     (tmp_path / "a" / "rust-a-0.1.0-1.fc45.src.rpm").write_text("")
     (tmp_path / "a" / rd.config.TARGETS_FILE).write_text('only = ["fedora-44"]\n')
     assert rd.tui_overview.tui_stage(pkg).name == "targets"
-
-
-def test_tui_suggestions_follow_the_workflow(tmp_path):
-    assert [c for c, _, _, _, _ in rd.tui_overview.tui_suggestions(tmp_path)] == ["resolve", "init"]
-    make_package(tmp_path, "a", "rust-a", "0.1.0")
-    cmds = {c: (crates, flags) for c, crates, flags, _, _ in rd.tui_overview.tui_suggestions(tmp_path)}
-    # a package is suggested exactly the edge that comes next for it
-    assert list(cmds) == ["trial"]
-    assert cmds["trial"] == (["a"], ["discover"])
-    (tmp_path / "a" / "rust2rpm.toml").write_text("[tests]\n")
-    cmds = {c: (crates, flags) for c, crates, flags, _, _ in rd.tui_overview.tui_suggestions(tmp_path)}
-    assert list(cmds) == ["srpm"] and cmds["srpm"] == (["a"], [])
-    (tmp_path / "a" / "rust-a-0.1.0-1.fc45.src.rpm").write_text("")
-    cmds = {c: (crates, flags) for c, crates, flags, _, _ in rd.tui_overview.tui_suggestions(tmp_path)}
-    assert "trial" not in cmds and "srpm" not in cmds
-    assert cmds["review-plan"][0] == ["a"] and "status" in cmds
-
-
-def test_tui_suggestions_group_crates_by_stage(tmp_path):
-    make_package(tmp_path, "a", "rust-a", "0.1.0")  # at tests?
-    make_package(tmp_path, "b", "rust-b", "0.2.0")  # built, at review
-    (tmp_path / "b" / "rust2rpm.toml").write_text("[tests]\n")
-    (tmp_path / "b" / "rust-b-0.2.0-1.fc45.src.rpm").write_text("")
-    out = rd.tui_overview.tui_suggestions(tmp_path)
-    assert [(c, cr, fl) for c, cr, fl, _, _ in out] == [
-        ("trial", ["a"], ["discover"]),
-        ("review-plan", ["b"], []),
-        ("status", [], []),
-    ]
-    # each suggestion names the stage it is an edge out of
-    assert [why.split(":")[0] for _, _, _, _, why in out] == ["tests?", "review",
-                                                            "packaged vs. crates.io vs. the Fedora releases"]
 
 
 def test_tui_argv_from_form_values():
@@ -1898,91 +1852,6 @@ def test_parse_tool_states_reads_doctor_tools():
     assert rd.tui_results.parse_tool_states(lines) == {"mock": True}
 
 
-def test_tui_app_sidebar_gates_commands_on_missing_tools(tmp_path, monkeypatch):
-    pytest.importorskip("textual")
-    app_class = rd.tui_app.make_tui_app()
-    # a deterministic environment: mock and fedora-review absent, copr-cli present
-    monkeypatch.setattr(rd.tui_results, "parse_tool_states",
-                        lambda lines: {"mock": False, "copr-cli": True,
-                                       "fedora-review": False, "fedpkg": False})
-
-    async def drive():
-        app = app_class(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            options = app.query_one("#commands")
-
-            def option(name):
-                for i in range(options.option_count):
-                    o = options.get_option_at_index(i)
-                    if o.id == name:
-                        return o
-                raise AssertionError(f"{name} is not listed")
-
-            for _ in range(600):  # the probe runs 'doctor' as a subprocess
-                await pilot.pause(0.05)
-                if option("mock-chain").disabled:
-                    break
-            assert option("mock-chain").disabled
-            assert option("review").disabled  # needs fedora-review and mock
-            assert option("dist-git").disabled
-            assert not option("copr").disabled  # copr-cli is available
-            assert not option("trial").disabled  # needs no optional tool
-
-    asyncio.run(drive())
-
-def test_tui_stage_marks_unexplained_tests_tables(tmp_path):
-    make_package(tmp_path, "a", "rust-a", "0.1.0")
-    (tmp_path / "a" / "rust2rpm.toml").write_text(
-        '[tests]\nrun = false\ncomments = [\n'
-        '    "TODO: explain why doc is disabled (fails at runtime)",\n]\n')
-    pkg = rd.packages.local_packages(tmp_path)["a"]
-    assert rd.tui_overview.tui_stage(pkg).name == "tests-todo"
-    assert rd.tui_overview.tests_todo_crates(tmp_path) == ["a"]
-    # the stage edge is the in-UI editor, not another trial
-    assert [(c, cr) for c, cr, _, _, _ in rd.tui_overview.tui_suggestions(tmp_path)] == [("tests-edit", ["a"])]
-    # an explained table leaves the stage behind
-    (tmp_path / "a" / "rust2rpm.toml").write_text(
-        rd.tui_overview.replace_tests_comments((tmp_path / "a" / "rust2rpm.toml").read_text(),
-                                  ["doc tests need network"]))
-    assert rd.tui_overview.tui_stage(rd.packages.local_packages(tmp_path)["a"]).name == "srpm?"
-
-
-def test_tui_app_jumps_prefill_option_values(tmp_path):
-    pytest.importorskip("textual")
-    from textual.widgets import Input
-    app_class = rd.tui_app.make_tui_app()
-    make_package(tmp_path, "synta", "rust-synta", "0.4.0")
-
-    async def drive():
-        app = app_class(tmp_path)
-        async with app.run_test(size=(140, 45)) as pilot:
-            await pilot.pause()
-            # a jump with option values opens the form prefilled, including the
-            # single positional crate of 'copr-log'
-            app._show("copr-log", values={"chroot": "fedora-44-x86_64",
-                                          "project": "u/p", "crate": "synta"})
-            await app._rebuild.wait()
-            await pilot.pause()
-            assert app._argv() == ["synta", "--chroot", "fedora-44-x86_64", "--project", "u/p",
-                                   "--errors", "15"]  # the CLI default stays visible
-            # carry-over: the playbook keeps what the previous run established
-            app._last_form_values = {"project": "u/p", "chroot": "fedora-44-x86_64"}
-            app._show("copr")
-            await app._rebuild.wait()
-            await pilot.pause()
-            argv = app._argv()
-            assert "--project" in argv and "u/p" in argv
-            assert "fedora-44-x86_64" in argv  # the repeatable -r arrives as a filled row
-            # a new crate named by a jump arrives in the 'other crates' field
-            app._last_form_values = {}
-            app._show("init", prefill=["serde", "jsonschema"])
-            await app._rebuild.wait()
-            await pilot.pause()
-            assert app._argv() == ["jsonschema", "serde"]  # sorted, deterministic
-
-    asyncio.run(drive())
-
-
 def test_parse_columns_table_ignores_free_form_output():
     assert rd.tui_results.parse_columns_table(["== serde 1.0.217", "   rust2rpm --features default",
                                    "   ok", "NEW       serde 1.0  <- jsonschema"]) is None
@@ -2037,164 +1906,364 @@ def test_tui_line_style(line, style):
     assert rd.tui_app.tui_line_style(line) == style
 
 
-def test_tui_app_lists_and_runs_commands(tmp_path, monkeypatch):
+
+
+# --- the TUI's lifecycle board, actions and settings -------------------------
+
+@pytest.fixture
+def tui_cache(tmp_path, monkeypatch):
+    """Settings and logs go to a scratch cache, never the user's."""
+    cache = tmp_path / ".cache"
+    monkeypatch.setattr(rd.config, "CACHE_DIR", cache)
+    return cache
+
+
+def _static_text(widget) -> str:
+    # Static keeps what it shows in .content (textual 8) or ._content (textual 4)
+    shown = getattr(widget, "content", None) or getattr(widget, "_content", None)
+    return str(shown or "")
+
+
+async def _until(pilot, pred, steps: int = 600) -> bool:
+    for _ in range(steps):
+        if pred():
+            return True
+        await pilot.pause(0.05)
+    return pred()
+
+
+def _sheet_argv(sheet) -> list[str]:
+    return rd.tui_form.tui_argv(sheet.fields, sheet.values())
+
+
+def test_tui_board_groups_packages_in_pipeline_order(tmp_path):
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    make_package(tmp_path, "b", "rust-b", "0.2.0")
+    (tmp_path / "b" / "rust2rpm.toml").write_text("[tests]\n")
+    (tmp_path / "b" / "rust-b-0.2.0-1.fc45.src.rpm").write_text("")
+    board = rd.tui_overview.board(tmp_path)
+    # every stage is listed, empty ones too, in the order a package walks them
+    assert list(board) == rd.tui_overview.BOARD_ORDER
+    assert set(board) == set(rd.tui_overview.STAGES)
+    assert [p.crate for p in board["tests?"]] == ["a"]
+    assert [p.crate for p in board["review"]] == ["b"]
+    assert board["srpm?"] == []
+    # each stage names a plain-language action that moves its packages on
+    for stage in rd.tui_overview.TUI_STAGES:
+        assert stage.action in rd.tui_actions.ACTIONS, stage.name
+        assert stage.label and stage.blurb
+        assert rd.tui_actions.STAGE_ACTIONS[stage.name][0] == stage.action
+
+
+def test_tui_package_checklist_marks_where_a_package_is(tmp_path):
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    pkg = rd.packages.local_packages(tmp_path)["a"]
+    marks = dict((text, mark) for mark, text in rd.tui_overview.package_checklist(pkg))
+    assert marks["spec generated"] == "✓"
+    assert marks["no Cargo.toml patch"] == "–"  # neither done nor to do
+    assert marks["tests chosen"] == "✗"  # the step it is at
+    assert marks["SRPM 0.1.0"] == "·"  # not reached yet
+    assert marks["review request filed"] == "·"
+    (tmp_path / "a" / "rust2rpm.toml").write_text("[tests]\n")
+    (tmp_path / "a" / "a-fix-metadata.diff").write_text("x")
+    marks = dict((text, mark) for mark, text in rd.tui_overview.package_checklist(pkg))
+    assert marks["tests chosen"] == "✓" and marks["Cargo.toml patch"] == "✓"
+    assert marks["SRPM 0.1.0"] == "✗"
+    # a target-limited package ends in COPR, not in a review request
+    (tmp_path / "a" / rd.config.TARGETS_FILE).write_text('only = ["fedora-44"]\n')
+    texts = [text for _, text in rd.tui_overview.package_checklist(pkg)]
+    assert "COPR build" in texts and "review request filed" not in texts
+
+
+def test_tui_stage_marks_unexplained_tests_tables(tmp_path):
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    (tmp_path / "a" / "rust2rpm.toml").write_text(
+        '[tests]\nrun = false\ncomments = [\n'
+        '    "TODO: explain why doc is disabled (fails at runtime)",\n]\n')
+    pkg = rd.packages.local_packages(tmp_path)["a"]
+    assert rd.tui_overview.tui_stage(pkg).name == "tests-todo"
+    assert rd.tui_overview.tests_todo_crates(tmp_path) == ["a"]
+    # the stage's action is the in-UI reason editor, not another trial
+    assert rd.tui_overview.STAGES["tests-todo"].action == "explain-skips"
+    assert rd.tui_actions.ACTIONS["explain-skips"].cmd == ""
+    # an explained table leaves the stage behind
+    (tmp_path / "a" / "rust2rpm.toml").write_text(
+        rd.tui_overview.replace_tests_comments((tmp_path / "a" / "rust2rpm.toml").read_text(),
+                                  ["doc tests need network"]))
+    assert rd.tui_overview.tui_stage(rd.packages.local_packages(tmp_path)["a"]).name == "srpm?"
+
+
+def test_tui_actions_run_real_commands_and_flags():
+    parsers = _subcommand_parsers()
+    for key, a in rd.tui_actions.ACTIONS.items():
+        assert a.verb and a.explain, key
+        if not a.cmd:
+            continue
+        assert a.cmd in parsers, key
+        keys = {f.key for f in rd.tui_form.tui_fields(parsers[a.cmd])}
+        # an action only names fields its command has
+        for k in (*a.flags, *a.preset, *a.inputs, *a.labels):
+            assert k in keys, (key, k)
+    for stage, keys in rd.tui_actions.STAGE_ACTIONS.items():
+        assert stage in rd.tui_overview.STAGES
+        assert all(k in rd.tui_actions.ACTIONS for k in keys), stage
+
+
+@pytest.mark.parametrize("cmd, flags, key", [
+    ("trial", [], "run-tests"),
+    ("trial", ["discover"], "choose-tests"),
+    ("trial", ["discover", "apply"], "apply-tests"),
+    ("trial", ["apply", "discover", "online"], "apply-tests"),
+    ("review-request", [], "review-request"),
+    ("review-request", ["file"], "file-request"),
+    ("copr", [], "copr"),  # --wait is a preset, not what makes it this action
+    ("tests-edit", [], "explain-skips"),
+])
+def test_tui_action_for_a_command_line(cmd, flags, key):
+    assert rd.tui_actions.action_for(cmd, flags).key == key
+
+
+def test_tui_action_for_an_unknown_command_still_runs_it():
+    a = rd.tui_actions.action_for("frobnicate", [])
+    assert (a.cmd, a.verb) == ("frobnicate", "Run frobnicate")
+
+
+def test_tui_settings_are_kept_per_root_in_the_cache(tmp_path, tui_cache):
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir(), two.mkdir()
+    assert rd.tui_actions.load_settings(one) == rd.tui_actions.TuiSettings()
+    rd.tui_actions.save_settings(one, rd.tui_actions.TuiSettings(project="u/p", chroots=["fedora-44-x86_64"]))
+    rd.tui_actions.save_settings(two, rd.tui_actions.TuiSettings(fas="someone"))
+    assert (tui_cache / rd.tui_actions.SETTINGS_FILE).exists()
+    assert rd.tui_actions.load_settings(one).project == "u/p"
+    assert rd.tui_actions.load_settings(one).chroots == ["fedora-44-x86_64"]
+    assert rd.tui_actions.load_settings(two).fas == "someone"
+    assert rd.tui_actions.load_settings(two).project == ""
+    # a damaged file is no reason to fail: the UI starts from empty settings
+    (tui_cache / rd.tui_actions.SETTINGS_FILE).write_text("{not json")
+    assert rd.tui_actions.load_settings(one) == rd.tui_actions.TuiSettings()
+    rd.tui_actions.save_settings(one, rd.tui_actions.TuiSettings(project="u/q"))
+    assert rd.tui_actions.load_settings(one).project == "u/q"
+
+
+def test_tui_settings_remember_only_what_was_unset():
+    s = rd.tui_actions.TuiSettings(fas="me")
+    assert rd.tui_actions.remember(s, {"project": " u/p ", "fas": "other", "chroot": ["fedora-44-x86_64"]})
+    assert (s.project, s.fas, s.chroots) == ("u/p", "me", ["fedora-44-x86_64"])
+    assert not rd.tui_actions.remember(s, {"project": "u/q", "chroot": "fedora-45-x86_64"})
+    assert s.project == "u/p"
+
+
+def test_tui_initial_values_take_settings_then_the_suggestion():
+    parsers = _subcommand_parsers()
+    s = rd.tui_actions.TuiSettings(project="u/p", chroots=["fedora-rawhide-x86_64", "fedora-44-x86_64"], fas="me")
+    copr = rd.tui_form.tui_fields(parsers["copr"])
+    v = rd.tui_actions.initial_values(rd.tui_actions.ACTIONS["copr"], copr, ["a", "b"], s)
+    # a repeatable chroot gets every chroot; the preset --wait starts checked
+    assert rd.tui_form.tui_argv(copr, v) == ["a", "b", "--project", "u/p", "--chroot", "fedora-rawhide-x86_64",
+                                             "--chroot", "fedora-44-x86_64", "--wait"]
+    mock = rd.tui_form.tui_fields(parsers["mock-chain"])
+    v = rd.tui_actions.initial_values(rd.tui_actions.ACTIONS["mock-chain"], mock, ["a"], s)
+    assert rd.tui_form.tui_argv(mock, v) == ["a", "--chroot", "fedora-rawhide-x86_64"]  # one chroot: the first
+    # resolve/init's -r changes what counts as missing: settings do not fill it
+    init = rd.tui_form.tui_fields(parsers["init"])
+    v = rd.tui_actions.initial_values(rd.tui_actions.ACTIONS["init"], init, ["serde"], s)
+    assert rd.tui_form.tui_argv(init, v) == ["serde", "--recursive"]
+    # what a suggestion names wins over the settings; copr-log takes one package
+    log = rd.tui_form.tui_fields(parsers["copr-log"])
+    v = rd.tui_actions.initial_values(rd.tui_actions.action_for("copr-log"), log, [], s,
+                                      values={"crate": "synta", "chroot": "fedora-44-x86_64"})
+    assert rd.tui_form.tui_argv(log, v) == ["synta", "--chroot", "fedora-44-x86_64", "--project", "u/p",
+                                            "--errors", "15"]
+
+
+def test_tui_primary_keys_put_what_matters_first():
+    parsers = _subcommand_parsers()
+    copr = rd.tui_form.tui_fields(parsers["copr"])
+    assert rd.tui_actions.primary_keys(rd.tui_actions.ACTIONS["copr"], copr) == [
+        "crates", "all", "project", "chroot", "wait"]
+    # whatever a command cannot run without is up front even if the action does not name it
+    log = rd.tui_form.tui_fields(parsers["copr-log"])
+    assert set(rd.tui_actions.primary_keys(rd.tui_actions.action_for("copr-log"), log)) >= {
+        "crate", "chroot", "project"}
+
+
+def test_tui_follow_ups_come_from_the_new_stages(tmp_path):
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    make_package(tmp_path, "b", "rust-b", "0.2.0")
+    (tmp_path / "b" / "rust2rpm.toml").write_text("[tests]\n")
+    steps = rd.tui_actions.follow_ups(tmp_path, ["b", "a", "gone"])
+    assert [(c, cr, fl) for c, cr, fl, _, _ in steps] == [
+        ("trial", ["a"], ["discover"]),
+        ("srpm", ["b"], []),
+    ]
+    # the action that just ran is not offered again for the packages it left in place
+    assert [c for c, _, _, _, _ in rd.tui_actions.follow_ups(tmp_path, ["a", "b"], after="choose-tests")] == ["srpm"]
+    merged = rd.tui_actions.merge_steps(steps, [("srpm", ["b"], [], {}, "again")])
+    assert len(merged) == 2
+
+
+def test_tui_action_needed_lines_are_collected():
+    assert rd.tui_actions.action_needed(
+        ["== a", "ACTION NEEDED: a: license file missing", "ok"]) == ["a: license file missing"]
+
+
+def test_tui_app_board_opens_the_stage_action_with_packages_picked(tmp_path, tui_cache):
     pytest.importorskip("textual")
-    from textual.widgets import Checkbox, Input, Select
     app_class = rd.tui_app.make_tui_app()
     make_package(tmp_path, "a", "rust-a", "0.1.0")
-    # this test navigates the sidebar: keep the tool probe from rebuilding it
-    monkeypatch.setattr(rd.tui_results, "parse_tool_states", lambda lines: {})
 
     async def drive():
         app = app_class(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            options = app.query_one("#commands")
-            listed = {options.get_option_at_index(i).id for i in range(options.option_count)}
-            assert set(_subcommand_parsers()) - {"tui"} <= listed
-            await pilot.press("down", "down", "enter")  # Overview is the first entry; then doctor
+            board = app.screen
+            assert type(board).__name__ == "BoardScreen"
+            # it opens on the first stage with work in it, the package list focused
+            assert board.stage == "tests?"
+            assert app.focused is board.query_one("#pkgs")
+            assert "Choose tests" in _static_text(board.query_one("#hint"))
+            await pilot.press("enter")
             await pilot.pause()
-            assert app._cmd == "doctor"
-            await pilot.press("ctrl+r")
-            run_btn = app.query_one("#run")
-            for _ in range(600):  # doctor probes the environment; allow 30s
-                await pilot.pause(0.05)
-                if not run_btn.disabled:
-                    break
-            assert not run_btn.disabled, "the command did not finish"
-            # doctor's state lines are rendered as a table and the Table tab opens
-            assert app.query_one("#result-table").row_count >= 3
-            assert app.query_one("#tabs").active == "table"
-            # 'regen' renders its two mutually exclusive groups as choice controls
-            app._show("regen")
-            await app._rebuild.wait()
-            app.query_one(f"#{app._wid('g-1')}", Select).value = "compat-2"
+            sheet = app.screen
+            assert type(sheet).__name__ == "ActionSheet"
+            assert sheet.action.key == "choose-tests"
+            # the package arrives picked, the action's flag set, --timeout at its CLI default
+            assert _sheet_argv(sheet) == ["a", "--discover", "--timeout", "900"]
+            await pilot.press("escape")
             await pilot.pause()
-            assert app._argv() == ["--no-compat"]
-            # 'status' offers the tree's packages as checkboxes
-            app._show("status")
-            await app._rebuild.wait()
-            app.query_one(f"#{app._wid('pk-a')}", Checkbox).value = True
+            # d opens the package's own page, its next step first
+            await pilot.press("d")
             await pilot.pause()
-            assert "a" in app._argv()
-            # required options gate Run: 'copr' needs --project
-            app._show("copr")
-            await app._rebuild.wait()
-            assert app.query_one("#run").disabled
-            app.query_one(f"#{app._wid('f-project')}", Input).value = "u/p"
-            await pilot.pause()
-            assert not app.query_one("#run").disabled
+            assert type(app.screen).__name__ == "PackageScreen"
+            assert app.screen.items[0] == ("action", "choose-tests")
 
     asyncio.run(drive())
 
 
-def test_tui_app_renders_a_positional_repeatable_workspace_argument(tmp_path):
+def test_tui_app_gates_actions_on_missing_tools(tmp_path, tui_cache, monkeypatch):
     pytest.importorskip("textual")
-    from textual.widgets import Input
     app_class = rd.tui_app.make_tui_app()
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    monkeypatch.setattr(rd.tui_results, "parse_tool_states",
+                        lambda lines: {"mock": False, "copr-cli": True,
+                                       "fedora-review": False, "fedpkg": False})
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            assert await _until(pilot, lambda: app.tools_ok)  # the probe runs 'doctor'
+            await pilot.pause()
+            # the board says what is missing up front
+            assert "missing: mock" in _static_text(app.screen.query_one("#topbar"))
+            app.open_action("mock-chain", ["a"])
+            await pilot.pause()
+            # an action that needs a missing tool says what to install, and does not run
+            assert app.screen.query_one("#run").disabled
+            assert "dnf install mock" in _static_text(app.screen.query_one("#sheet-warning"))
+            await pilot.press("escape")
+            app.open_action("review", ["a"])
+            await pilot.pause()
+            assert "fedora-review" in _static_text(app.screen.query_one("#sheet-warning"))
+            await pilot.press("escape")
+            app.open_action("run-tests", ["a"])  # needs no optional tool
+            await pilot.pause()
+            assert not app.screen.query_one("#run").disabled
+            assert not app.screen.query_one("#sheet-warning").display
+
+    asyncio.run(drive())
+
+
+def test_tui_app_sheet_folds_options_and_gates_on_required(tmp_path, tui_cache):
+    pytest.importorskip("textual")
+    from textual.widgets import Collapsible, Input, Select
+    app_class = rd.tui_app.make_tui_app()
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
 
     async def drive():
         app = app_class(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            app._show("workspace")
-            await app._rebuild.wait()
-            # 'workspace' takes repeatable positional paths: rows of inputs, no option string
-            assert app.query_one("#run").disabled  # the argument is required
-            app.query_one(f"#{app._wid('f-projects-0')}", Input).value = str(tmp_path / "my ws")
+            app.open_action("copr", ["a"])
             await pilot.pause()
-            assert app._argv() == [str(tmp_path / "my ws")]  # one argument, not two
-            assert not app.query_one("#run").disabled
+            sheet = app.screen
+            more = sheet.query_one(Collapsible)
+            assert more.collapsed
+            # the inputs that matter are up front; the rest waits under More options
+            for key in ("crates", "project", "chroot", "wait"):
+                w = sheet.widgets.get(key) or sheet.multi[key][0]
+                assert more not in w.ancestors, key
+            for key in ("dry_run", "force", "retry_failed"):
+                assert more in sheet.widgets[key].ancestors, key
+            # labels are words, not option strings
+            assert "COPR project *" in [_static_text(lbl) or str(lbl.render()) for lbl in sheet.query(".field-label")]
+            # a required option gates Run and the preview says what is missing
+            assert sheet.query_one("#run").disabled
+            assert "still needed: COPR project" in _static_text(sheet.query_one("#preview"))
+            sheet.widgets["project"].value = "u/p"
+            await pilot.pause()
+            assert not sheet.query_one("#run").disabled
+            await pilot.press("escape")
+            # 'regen' renders a mutually exclusive group as one choice
+            app.open_action("regen", [])
+            await pilot.pause()
+            select = next(s for s in app.screen.query(Select) if s.name == "choice:1")
+            select.value = "compat-2"
+            await pilot.pause()
+            assert _sheet_argv(app.screen) == ["--no-compat"]
+            # and a value-taking mode shows its input only once chosen
+            mode = next(s for s in app.screen.query(Select) if s.name == "choice:0")
+            value = next(i for i in app.screen.query(Input) if i.name == "choicev:0")
+            assert not value.display
+            mode.value = "version"
+            await pilot.pause()
+            assert value.display
+            value.value = "1.2.3"
+            await pilot.pause()
+            assert _sheet_argv(app.screen) == ["--version", "1.2.3", "--no-compat"]
 
     asyncio.run(drive())
 
 
-def test_tui_app_repeatable_rows_stay_visible_and_aligned(tmp_path):
-    """A capped form must not squeeze the repeatable-argument rows away.
-
-    Textual shrinks containers whose height is 'auto' to whatever space is left,
-    so a capped form used to collapse each row to a border with no content line
-    while the Buttons beside it kept their three rows and covered them.
-    """
+def test_tui_app_repeatable_rows_stay_visible_and_aligned(tmp_path, tui_cache):
+    """A repeatable argument is rows of inputs: each row keeps its height, its
+    remove button sits beside the input, and + / – add and take rows away."""
     pytest.importorskip("textual")
-    from textual.widgets import Button, ContentSwitcher, Input
     from textual.containers import Horizontal
+    from textual.widgets import Button, Input
     app_class = rd.tui_app.make_tui_app()
 
     async def drive():
         app = app_class(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            app._show("workspace")
-            await app._rebuild.wait()
-            app.query_one("#screens", ContentSwitcher).current = "work"
+            app.open_action("workspace", [])
             await pilot.pause()
-
-            def row_groups(node):
-                """The Horizontal rows of inputs this node holds."""
-                return [
-                    field.parent
-                    for field in node.query(Input)
-                    if isinstance(field.parent, Horizontal)
-                ]
-
-            # rows are checked wherever they are mounted: the columns a command puts
-            # them in is another test's contract
-            panes = [app.query_one("#form-args"), app.query_one("#form-options")]
-            rows = [row for pane in panes for row in row_groups(pane)]
-            assert rows, "the repeatable arguments render no input rows"
-            for row in rows:
-                field = row.query_one(Input)
-                remove = row.query_one(Button)
-                # the input has a content line, so what is typed is shown
-                assert field.content_region.height >= 1, "the input shows no text"
-                assert field.content_region.width >= 10
-                # the row keeps the height its widgets ask for
-                assert row.region.height == rd.tui_app.FORM_ROW_HEIGHT
-                # and its button sits on the same rows, not over them
-                assert field.region.y == remove.region.y == row.region.y
-                assert field.region.height == remove.region.height
-                # the group of rows states the height its rows need: nothing to squeeze
-                assert row.parent.region.height >= len(row.parent.children) * (
-                    rd.tui_app.FORM_ROW_HEIGHT
-                )
-            # nothing else in a pane shares rows with an input row
-            for pane in panes:
-                groups = [w for w in pane.children if row_groups(w)]
-                occupied = sorted(
-                    (r.region.y, r.region.y + r.region.height)
-                    for w in groups
-                    for r in row_groups(w)
-                )
-                for widget in pane.children:
-                    if widget in groups:
-                        continue
-                    span = (widget.region.y, widget.region.y + widget.region.height)
-                    assert all(
-                        top >= span[1] or bottom <= span[0] for top, bottom in occupied
-                    ), f"{type(widget).__name__} overlaps an input row"
-
-            # typing lands in the row and reaches the preview
-            field = app.query("#form Input").first()
+            sheet = app.screen
+            # 'workspace' takes required positional paths: Run waits for one
+            assert sheet.query_one("#run").disabled
+            rows = sheet.multi["projects"]
+            assert len(rows) == 1
+            field = rows[0]
+            row = field.parent
+            assert isinstance(row, Horizontal)
+            remove = row.query_one(Button)
+            assert field.content_region.height >= 1, "the input shows no text"
+            assert row.region.height == rd.tui_app.FORM_ROW_HEIGHT
+            assert field.region.y == remove.region.y == row.region.y
+            # a path with a space in it stays one argument
             app.set_focus(field)
-            await pilot.press(*str(tmp_path / "ws"))
-            assert field.value == str(tmp_path / "ws")
-            assert str(tmp_path / "ws") in app._argv()
-
-            # '+' adds a row the same shape as the first; '–' takes it away again
-            await pilot.click(f"#{app._wid('add-projects')}")
+            await pilot.press(*str(tmp_path / "my ws"))
+            assert _sheet_argv(sheet) == [str(tmp_path / "my ws")]
+            assert not sheet.query_one("#run").disabled
+            add = next(b for b in sheet.query(Button) if b.name == "add:projects")
+            add.press()
             await pilot.pause()
-            holder = rows[0].parent
-            added = [
-                f.parent
-                for f in holder.query(Input)
-                if isinstance(f.parent, Horizontal)
-            ]
-            assert len(added) == 2
+            holder = row.parent
+            assert len(holder.query(Input)) == 2
             assert holder.region.height == 2 * rd.tui_app.FORM_ROW_HEIGHT
-            second = holder.query(Input).last()
-            assert second.content_region.height >= 1, "the added input shows no text"
-            await pilot.click(f"#{app._wid('rm-projects-0')}")
+            assert holder.query(Input).last().content_region.height >= 1
+            remove.press()
             await pilot.pause()
             assert len(holder.query(Input)) == 1
             assert holder.region.height == rd.tui_app.FORM_ROW_HEIGHT
@@ -2202,238 +2271,58 @@ def test_tui_app_repeatable_rows_stay_visible_and_aligned(tmp_path):
     asyncio.run(drive())
 
 
-def test_tui_app_form_splits_arguments_and_options_into_panes(tmp_path):
-    """Arguments on the left, options on the right, on every command screen.
-
-    The columns are the form itself: what a command acts on (the crate picker, a
-    positional path or crate name) is mounted in the left one, every declared
-    option in the right one, and both keep the same geometry from command to
-    command so a command's inputs never span the whole form.
-    """
+def test_tui_app_runs_a_command_and_summarizes_it(tmp_path, tui_cache, monkeypatch):
     pytest.importorskip("textual")
-    from textual.widgets import Checkbox, ContentSwitcher, Input
+    from textual.widgets import ContentSwitcher, DataTable
     app_class = rd.tui_app.make_tui_app()
     make_package(tmp_path, "a", "rust-a", "0.1.0")
+    monkeypatch.setattr(rd.tui_results, "parse_tool_states", lambda lines: {})
 
     async def drive():
         app = app_class(tmp_path)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            app.query_one("#screens", ContentSwitcher).current = "work"
+            # every command is reachable through "All commands"
+            await pilot.press("question_mark")
             await pilot.pause()
-            args = app.query_one("#form-args")
-            options = app.query_one("#form-options")
-            form = app.query_one("#form")
-            column = None
-
-            def columns_are_the_form():
-                """Both columns are laid out, side by side, at the same place."""
-                nonlocal column
-                assert args.display and options.display
-                assert args.region.x < options.region.x, (
-                    "the panes are stacked, not side by side"
-                )
-                assert options.region.width < form.region.width
-                if column is None:
-                    column = (options.region.x, options.region.width)
-                assert (options.region.x, options.region.width) == column, (
-                    "the columns move from command to command"
-                )
-
-            # a command whose argument is the crate picker
-            app._show("trial")
-            await app._rebuild.wait()
+            menu = app.screen
+            listed = {menu.query_one("OptionList").get_option_at_index(i).id
+                      for i in range(menu.query_one("OptionList").option_count)}
+            assert set(_subcommand_parsers()) - {"tui"} <= listed
+            menu.dismiss("doctor")
             await pilot.pause()
-            columns_are_the_form()
-            assert app.query_one(f"#{app._wid('pk-a')}", Checkbox).parent is args
-            discover = app.query_one(f"#{app._wid('f-discover')}", Checkbox)
-            assert discover.parent is options
-            # flags read like the crate rows: one per line, short help inline
-            assert "try all test targets" in discover.label.plain
-
-            # a command whose argument is a positional path: its input rows are the
-            # left column, and every option -- even one that takes a value -- stays
-            # in the right one
-            app._show("workspace")
-            await app._rebuild.wait()
+            assert app.screen.action.cmd == "doctor"
+            await pilot.press("ctrl+r")
             await pilot.pause()
-            columns_are_the_form()
-            assert app._rows_holder("projects").parent is args
-            assert app._rows_holder("local_root").parent is options
-            assert app.query_one(f"#{app._wid('f-target')}", Input).parent is options
-            assert app.query_one(f"#{app._wid('f-json')}", Checkbox).parent is options
-            assert app.query_one(f"#{app._wid('f-refresh')}", Checkbox).parent is options
-
-            # a command whose only argument is a single crate name
-            app._show("copr-log")
-            await app._rebuild.wait()
+            run = app.screen
+            assert type(run).__name__ == "RunScreen"
+            assert await _until(pilot, lambda: not run.running), "the command did not finish"
             await pilot.pause()
-            columns_are_the_form()
-            assert app.query_one(f"#{app._wid('f-crate')}", Input).parent is args
-            assert app.query_one(f"#{app._wid('f-chroot')}", Input).parent is options
-
-            # a command with nothing to type leaves both columns empty
-            app._show("doctor")
-            await app._rebuild.wait()
+            # the run ends on its summary: the verdict and doctor's state lines as a table
+            assert run.query_one("#run-view", ContentSwitcher).current == "run-summary"
+            assert run.query_one("#result-table", DataTable).row_count >= 3
+            assert "Check setup" in _static_text(run.query_one("#verdict"))
+            await pilot.press("l")
+            assert run.query_one("#run-view", ContentSwitcher).current == "run-log"
+            await pilot.press("escape")
             await pilot.pause()
-            columns_are_the_form()
-            assert not args.children and not options.children
+            assert type(app.screen).__name__ == "BoardScreen"
 
     asyncio.run(drive())
 
 
-def test_tui_app_results_take_the_whole_screen_when_asked(tmp_path):
-    """ctrl+f hands the log or table the rows the form was holding, and back.
-
-    '#view' is 'height: 1fr', so a filled form is what squeezes a run's output:
-    the toggle hides the form only, and the run bar keeps Run and the command line.
-    """
-    pytest.importorskip("textual")
-    from textual.widgets import ContentSwitcher
-    app_class = rd.tui_app.make_tui_app()
-    make_package(tmp_path, "a", "rust-a", "0.1.0")
-
-    async def drive():
-        app = app_class(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            app.query_one("#screens", ContentSwitcher).current = "work"
-            await pilot.pause()
-            app._show("trial")
-            await app._rebuild.wait()
-            await pilot.pause()
-            form, view = app.query_one("#form"), app.query_one("#view")
-            assert form.display and form.region.height > 0
-            squeezed = view.region.height
-
-            await pilot.press("ctrl+f")
-            await pilot.pause()
-            assert not form.display, "the form still holds rows"
-            assert view.region.height > squeezed, "the log did not gain the rows"
-            assert app.query_one("#run").display, "Run went away with the form"
-            assert app.query_one("#preview").display, "the command line went away"
-
-            await pilot.press("ctrl+f")
-            await pilot.pause()
-            assert form.display and view.region.height == squeezed
-
-            # choosing a command means wanting to fill it in: the form comes back
-            await pilot.press("ctrl+f")
-            await pilot.pause()
-            assert not form.display
-            app._show("status")
-            await app._rebuild.wait()
-            await pilot.pause()
-            assert form.display, "the form stayed hidden"
-            # the log keeps the rows this command's form leaves it, to the bottom
-            work = app.query_one("#work").region
-            assert view.region.y + view.region.height == work.y + work.height
-
-    asyncio.run(drive())
+async def _finished_run(app, pilot, cmd: str, flags: list[str], crates: list[str], lines: list[str], code=0):
+    """A RunScreen showing what 'lines' would have printed (its own run is '--help')."""
+    screen = type(app).RunScreen(rd.tui_actions.action_for(cmd, flags), ["--help"], crates)
+    app.push_screen(screen)
+    assert await _until(pilot, lambda: not screen.running)
+    screen.stdout, screen.lines = list(lines), list(lines)
+    screen.finish(code)
+    await pilot.pause()
+    return screen
 
 
-def test_tui_app_leaves_no_dead_rows_between_the_form_and_the_log(tmp_path):
-    """Every row between a form and the log belongs to a widget.
-
-    Textual's Horizontal defaults to 'height: 1fr', so the run bar was competing
-    with the log for whatever space the form left — twelve rows to show one line
-    of buttons — and the form kept its full cap even with nothing to show.
-    """
-    pytest.importorskip("textual")
-    from textual.containers import Vertical
-    from textual.widgets import ContentSwitcher
-    app_class = rd.tui_app.make_tui_app()
-
-    async def drive():
-        app = app_class(tmp_path)
-        async with app.run_test(size=(100, 46)) as pilot:
-            await pilot.pause()
-            app.query_one("#screens", ContentSwitcher).current = "work"
-            await pilot.pause()
-
-            def parts():
-                return {w.id: w for w in app.query_one("#work").children}
-
-            def nothing_is_idle():
-                """The form is its content; the log runs to the bottom."""
-                form, runbar = parts()["form"], parts()["runbar"]
-                tabs, view = parts()["tabs"], parts()["view"]
-                tallest = max(
-                    pane.content_region.height
-                    for pane in app.query("#form Vertical")
-                    if pane.id
-                )
-                assert form.region.height == tallest, "the form holds rows it does not show"
-                assert runbar.region.y + runbar.region.height == tabs.region.y, (
-                    "dead rows between the run bar and the results"
-                )
-                assert tabs.region.y + tabs.region.height == view.region.y
-                work = app.query_one("#work").region
-                assert view.region.y + view.region.height == work.y + work.height, (
-                    "the log stops short of the bottom"
-                )
-                return view.region.height
-
-            # a command with nothing to type holds no rows at all
-            app._show("doctor")
-            await app._rebuild.wait()
-            await pilot.pause()
-            assert parts()["form"].region.height == 0
-            empty = nothing_is_idle()
-
-            # a short form is exactly as tall as its tallest column
-            app._show("workspace")
-            await app._rebuild.wait()
-            await pilot.pause()
-            assert 0 < parts()["form"].region.height < 16
-            short = nothing_is_idle()
-            assert short < empty, "a form took rows the log already had"
-
-            # a form longer than the cap is cut to it and scrolls
-            for i in range(8):
-                make_package(tmp_path, f"c{i}", f"rust-c{i}", "0.1.0")
-            app._show("review-request")
-            await app._rebuild.wait()
-            await pilot.pause()
-            nothing_is_idle()
-            assert parts()["form"].region.height <= 16
-            assert app.query_one("#form-options", Vertical).max_scroll_y > 0, (
-                "the long column is cut off instead of scrollable"
-            )
-
-    asyncio.run(drive())
-
-
-def test_tui_app_overview_jumps_with_crates_picked(tmp_path):
-    pytest.importorskip("textual")
-    from textual.widgets import ContentSwitcher, DataTable, OptionList
-    app_class = rd.tui_app.make_tui_app()
-    make_package(tmp_path, "a", "rust-a", "0.1.0")
-
-    async def drive():
-        app = app_class(tmp_path)
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            # the app opens on the Overview, showing the tree state
-            assert app.query_one("#screens", ContentSwitcher).current == "overview"
-            assert app.query_one("#pkg-table", DataTable).row_count == 1
-            # a package without [tests] is suggested exactly the next edge: trial
-            assert [c for c, _, _, _, _ in app._suggestions] == ["trial"]
-            suggestions = app.query_one("#suggestions", OptionList)
-            app.on_option_list_option_selected(
-                OptionList.OptionSelected(suggestions, suggestions.get_option_at_index(0), 0))
-            await app._rebuild.wait()
-            assert app.query_one("#screens", ContentSwitcher).current == "work"
-            assert app._cmd == "trial"
-            # the suggested crates arrive picked in the form
-            assert app.query_one(f"#{app._wid('pk-a')}").value is True
-            # the suggested flags arrive set too, and --timeout shows its CLI default
-            assert app._argv() == ["a", "--discover", "--timeout", "900"]
-
-    asyncio.run(drive())
-
-
-def test_tui_app_trial_results_drive_next_steps(tmp_path):
+def test_tui_app_trial_results_drive_next_steps(tmp_path, tui_cache):
     pytest.importorskip("textual")
     from textual.widgets import DataTable, OptionList
     app_class = rd.tui_app.make_tui_app()
@@ -2445,39 +2334,34 @@ def test_tui_app_trial_results_drive_next_steps(tmp_path):
         "Suggested [tests] table for rust2rpm.toml (replace the TODO comments with real reasons):",
         "[tests]",
         "run = []",
+        "ACTION NEEDED: synta: tests need synta-certificate",
     ]
 
     async def drive():
         app = app_class(tmp_path)
         async with app.run_test(size=(140, 45)) as pilot:
             await pilot.pause()
-            app._show("trial")
-            await app._rebuild.wait()
-            app._stdout = trial_lines
-            app._render_structured()
+            run = await _finished_run(app, pilot, "trial", ["discover"], ["synta"], trial_lines, code=1)
+            # the verdict lines become a table, the problems are spelled out
+            assert run.query_one("#result-table", DataTable).row_count == 1
+            verdict = _static_text(run.query_one("#verdict"))
+            assert "failed" in verdict and "tests need synta-certificate" in verdict
+            # the suggested [tests] table is the first next step: write it
+            cmd, crates, flags, _, _ = run.steps[0]
+            assert (cmd, crates, flags) == ("trial", ["synta"], ["discover", "apply"])
+            assert rd.tui_actions.action_for(cmd, flags).verb == "Write the [tests] table"
+            nxt = run.query_one("#next", OptionList)
+            run.on_option_list_option_selected(OptionList.OptionSelected(nxt, nxt.get_option_at_index(0), 0))
             await pilot.pause()
-            # the verdict lines become a table and the Table tab opens
-            assert app.query_one("#result-table", DataTable).row_count == 1
-            assert app.query_one("#tabs").active == "table"
-            # the suggested [tests] table becomes an apply-and-recheck next step
-            assert [(c, cr, fl) for c, cr, fl, _, _ in app._result_actions] == [
-                ("trial", ["synta"], ["discover", "apply"])]
-            acts = app.query_one("#result-actions", OptionList)
-            app.on_option_list_option_selected(
-                OptionList.OptionSelected(acts, acts.get_option_at_index(0), 0))
-            await app._rebuild.wait()
-            # selecting it reopens trial with the crate picked and both flags set
-            assert app._cmd == "trial"
-            assert app.query_one(f"#{app._wid('pk-synta')}").value is True
-            assert app.query_one(f"#{app._wid('f-discover')}").value is True
-            assert app.query_one(f"#{app._wid('f-apply')}").value is True
-            argv = app._argv()
-            assert "--discover" in argv and "--apply" in argv
+            sheet = app.screen
+            assert sheet.action.key == "apply-tests"
+            assert sheet.widgets["discover"].value is True and sheet.widgets["apply"].value is True
+            assert _sheet_argv(sheet)[0] == "synta"
 
     asyncio.run(drive())
 
 
-def test_tui_app_srpm_results_render_as_a_table(tmp_path):
+def test_tui_app_srpm_results_render_as_a_table(tmp_path, tui_cache):
     pytest.importorskip("textual")
     from textual.widgets import DataTable
     app_class = rd.tui_app.make_tui_app()
@@ -2493,47 +2377,25 @@ def test_tui_app_srpm_results_render_as_a_table(tmp_path):
         app = app_class(tmp_path)
         async with app.run_test(size=(140, 45)) as pilot:
             await pilot.pause()
-            app._show("srpm")
-            await app._rebuild.wait()
-            app._stdout = srpm_lines
-            app._render_structured()
+            run = await _finished_run(app, pilot, "srpm", [], ["a"], srpm_lines)
+            table = run.query_one("#result-table", DataTable)
+            assert table.display and table.row_count == 1
+            # rebuilding the summary does not stack columns or rows
+            run.finish(0)
             await pilot.pause()
-            # the per-crate stage lines become a table and the Table tab opens
-            assert app.query_one("#result-table", DataTable).row_count == 1
-            assert app.query_one("#tabs").active == "table"
-            # output with no table shape goes back to the Log view, never an empty table
-            app._stdout = ["nothing structured"]
-            app._render_structured()
+            assert table.row_count == 1 and len(table.columns) == 5
+            # output with no table shape shows no empty table
+            run.stdout = run.lines = ["nothing structured"]
+            run.finish(0)
             await pilot.pause()
-            assert app.query_one("#tabs").active == "log"
-            # starting a run shows the streaming Log even if a table was open before
-            app._stdout = srpm_lines
-            app._render_structured()
-            await pilot.pause()
-            assert app.query_one("#tabs").active == "table"
-            app.action_run_command()  # 'srpm' with no crates picked: it dies on stderr
-            assert app.query_one("#tabs").active == "log"
-            run_btn = app.query_one("#run")
-            for _ in range(600):
-                await pilot.pause(0.05)
-                if not run_btn.disabled:
-                    break
-            assert not run_btn.disabled, "the command did not finish"
-            assert app.query_one("#tabs").active == "log"
-            assert app.query_one("#result-table", DataTable).row_count == 0
-            # switching commands leaves the previous command's table: start from the log
-            app._stdout = srpm_lines
-            app._render_structured()
-            await pilot.pause()
-            assert app.query_one("#tabs").active == "table"
-            app._show("status")
-            await app._rebuild.wait()
-            assert app.query_one("#tabs").active == "log"
+            assert not table.display
+            # the package's next step comes from its stage even when the tool proposes none
+            assert run.steps and run.steps[0][0] == "trial"
 
     asyncio.run(drive())
 
 
-def test_tui_app_tool_proposed_steps_become_jumps(tmp_path):
+def test_tui_app_tool_proposed_steps_become_actions(tmp_path, tui_cache):
     pytest.importorskip("textual")
     from textual.widgets import OptionList
     app_class = rd.tui_app.make_tui_app()
@@ -2552,30 +2414,21 @@ def test_tui_app_tool_proposed_steps_become_jumps(tmp_path):
         app = app_class(tmp_path)
         async with app.run_test(size=(140, 45)) as pilot:
             await pilot.pause()
-            app._show("review-plan")
-            await app._rebuild.wait()
-            app._stdout = plan_lines
-            app._render_structured()
+            run = await _finished_run(app, pilot, "review-plan", [], ["synta-derive"], plan_lines)
+            assert run.query_one("#result-table").row_count == 1
+            assert [(c, cr, fl) for c, cr, fl, _, _ in run.steps][0] == ("review", ["synta-derive"], [])
+            nxt = run.query_one("#next", OptionList)
+            run.on_option_list_option_selected(OptionList.OptionSelected(nxt, nxt.get_option_at_index(0), 0))
             await pilot.pause()
-            # the plan renders as a board, and its own proposal becomes a jump
-            assert app.query_one("#result-table").row_count == 1
-            assert [(c, cr, fl) for c, cr, fl, _, _ in app._result_actions] == [
-                ("review", ["synta-derive"], [])]
-            assert app.query_one("#tabs").active == "table"
-            acts = app.query_one("#result-actions", OptionList)
-            app.on_option_list_option_selected(
-                OptionList.OptionSelected(acts, acts.get_option_at_index(0), 0))
-            await app._rebuild.wait()
-            # selecting it opens 'review' with the crate already picked
-            assert app._cmd == "review"
-            assert app.query_one(f"#{app._wid('pk-synta-derive')}").value is True
+            assert app.screen.action.key == "review"
+            assert _sheet_argv(app.screen)[0] == "synta-derive"
 
     asyncio.run(drive())
 
 
-def test_tui_app_tests_editor_writes_reasons(tmp_path):
+def test_tui_app_explains_test_skips_and_regenerates(tmp_path, tui_cache):
     pytest.importorskip("textual")
-    from textual.widgets import ContentSwitcher, Input, OptionList, Static
+    from textual.widgets import Input
     app_class = rd.tui_app.make_tui_app()
     make_package(tmp_path, "a", "rust-a", "0.1.0")
     (tmp_path / "a" / "rust2rpm.toml").write_text(
@@ -2586,39 +2439,58 @@ def test_tui_app_tests_editor_writes_reasons(tmp_path):
         app = app_class(tmp_path)
         async with app.run_test(size=(140, 45)) as pilot:
             await pilot.pause()
-            # the overview places the package on tests-todo and suggests the editor
-            assert [c for c, _, _, _, _ in app._suggestions] == ["tests-edit"]
-            suggestions = app.query_one("#suggestions", OptionList)
-            app.on_option_list_option_selected(
-                OptionList.OptionSelected(suggestions, suggestions.get_option_at_index(0), 0))
-            await app._tests_editor.wait()
+            assert app.screen.stage == "tests-todo"
+            await pilot.press("enter")
             await pilot.pause()
-            assert app.query_one("#screens", ContentSwitcher).current == "tests-edit"
-            # the TODO text arrives editable, with the table itself as context
-            table = app.query_one("#tests-edit-table", Static)
-            # Static stores the updated text in .content (textual ≥8) or
-            # ._content (textual 4.0); read whichever exists.
-            shown = getattr(table, "content", None) or getattr(table, "_content", None)
-            assert "run = false" in shown
-            editor = app.query_one("#tests-edit-rows")
+            editor = app.screen
+            assert type(editor).__name__ == "ExplainScreen"
+            # the TODO arrives editable, the table itself shown as context
             assert len(editor.query(Input)) == 1
+            assert any("run = false" in _static_text(s) for s in editor.query("Static"))
             editor.query(Input).first().value = "doc tests need network; %cargo_test skips them"
-            app._save_tests_reasons()
+            editor.action_save()
             await pilot.pause()
             text = (tmp_path / "a" / "rust2rpm.toml").read_text()
-            assert "TODO" not in text and "doc tests need network" in text
-            assert 'run = false' in text
-            # the package leaves the stage: the overview now suggests the SRPM
-            assert [c for c, _, _, _, _ in app._suggestions] == ["srpm"]
-            # and the editor offers the follow-up jump
-            assert [c for c, _, _, _, _ in app._tests_actions] == ["regen", "srpm"]
-            acts = app.query_one("#tests-actions", OptionList)
-            app.on_option_list_option_selected(
-                OptionList.OptionSelected(acts, acts.get_option_at_index(0), 0))
-            await app._rebuild.wait()
+            assert "TODO" not in text and "doc tests need network" in text and "run = false" in text
+            # saving goes straight on to regenerate the spec for those packages
+            run = app.screen
+            assert type(run).__name__ == "RunScreen"
+            assert (run.action.key, run.argv) == ("regen", ["a"])
+            assert await _until(pilot, lambda: not run.running)
+            pkg = rd.packages.local_packages(tmp_path)["a"]
+            assert rd.tui_overview.tui_stage(pkg).name == "srpm?"
+
+    asyncio.run(drive())
+
+
+def test_tui_app_onboarding_routes_crates_and_projects(tmp_path, tui_cache):
+    pytest.importorskip("textual")
+    from textual.widgets import Input
+    app_class = rd.tui_app.make_tui_app()
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    async def drive():
+        app = app_class(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            assert app.query_one("#screens", ContentSwitcher).current == "work"
-            assert app._cmd == "regen"
-            assert app.query_one(f"#{app._wid('pk-a')}").value is True
+            # an empty root opens on onboarding and says what to do
+            board = app.screen
+            assert "Nothing packaged here yet" in _static_text(board.query_one("#stage-title"))
+            await pilot.press("n")
+            await pilot.pause()
+            new = app.screen
+            assert app.focused is new.query_one("#what", Input)
+            await pilot.press(*"serde_json_path jsonschema@^0.30")
+            assert new.plan() == ("resolve", ["serde_json_path", "jsonschema@^0.30"], {})
+            new.query_one("#what", Input).value = str(project)
+            await pilot.pause()
+            assert new.plan() == ("workspace", [], {"projects": str(project)})
+            assert "Audit a Rust project" in _static_text(new.query_one("#new-plan"))
+            # More options opens the full sheet with the project filled in
+            new.start("more")
+            await pilot.pause()
+            assert app.screen.action.key == "workspace"
+            assert _sheet_argv(app.screen) == [str(project)]
 
     asyncio.run(drive())

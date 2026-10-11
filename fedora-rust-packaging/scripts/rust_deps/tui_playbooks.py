@@ -25,37 +25,33 @@ TUI_RESULT_RENDERERS = {
 class TuiPlaybook:
     """What one command's screen does, as data: 'result' names the renderer
     that shapes its output into a table and next steps ('' keeps the generic
-    log view); 'requires' lists tools 'doctor' reports, and the sidebar dims
-    the command while one is missing; 'carry' are form values the previous run
-    established (the COPR project, the target chroot) that this form keeps."""
+    log view); 'requires' lists tools 'doctor' reports: while one is missing,
+    the action says what to install instead of running."""
 
     result: str = ""
     requires: tuple[str, ...] = ()
-    carry: tuple[str, ...] = ()
 
 
 TUI_PLAYBOOKS = {
     "doctor": TuiPlaybook(result="doctor"),
-    "status": TuiPlaybook(result="status", carry=("target",)),
+    "status": TuiPlaybook(result="status"),
     "resolve": TuiPlaybook(result="resolve"),
     "workspace": TuiPlaybook(result="workspace"),
     "order": TuiPlaybook(result="order"),
-    "check-targets": TuiPlaybook(carry=("chroot", "project")),
-    "init": TuiPlaybook(carry=("target",)),
+    "check-targets": TuiPlaybook(),
+    "init": TuiPlaybook(),
     "regen": TuiPlaybook(),
     "update": TuiPlaybook(result="update"),
     "trial": TuiPlaybook(result="trial"),
     "srpm": TuiPlaybook(result="srpm"),
     "mock-chain": TuiPlaybook(requires=("mock",)),
-    "copr": TuiPlaybook(requires=("copr-cli",), carry=("project", "chroot")),
-    "copr-log": TuiPlaybook(requires=("copr-cli",), carry=("project",)),
-    "copr-status": TuiPlaybook(
-        result="copr-status", requires=("copr-cli",), carry=("project", "chroot")
-    ),
-    "tmt": TuiPlaybook(requires=("mock",), carry=("project",)),
-    "review": TuiPlaybook(requires=("fedora-review", "mock"), carry=("chroot",)),
-    "review-request": TuiPlaybook(result="review-request", carry=("project", "chroot")),
-    "review-plan": TuiPlaybook(result="review-plan", carry=("project", "chroot")),
+    "copr": TuiPlaybook(requires=("copr-cli",)),
+    "copr-log": TuiPlaybook(requires=("copr-cli",)),
+    "copr-status": TuiPlaybook(result="copr-status", requires=("copr-cli",)),
+    "tmt": TuiPlaybook(requires=("mock",)),
+    "review": TuiPlaybook(requires=("fedora-review", "mock")),
+    "review-request": TuiPlaybook(result="review-request"),
+    "review-plan": TuiPlaybook(result="review-plan"),
     "review-status": TuiPlaybook(),
     "adopt": TuiPlaybook(),
     "dist-git": TuiPlaybook(requires=("fedpkg",)),
