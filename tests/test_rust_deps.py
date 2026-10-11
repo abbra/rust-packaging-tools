@@ -1394,6 +1394,20 @@ def test_parse_trial_output_reads_trial_blocks():
     assert rows[0]["log"].endswith("synta.log")
 
 
+def test_trial_records_an_all_passing_discovery(tmp_path):
+    make_package(tmp_path, "a", "rust-a", "0.1.0")
+    cfg = tmp_path / "a" / "rust2rpm.toml"
+    cfg.write_text('[package]\nsummary = "A"\n\n[tests]\nrun = ["doc"]\ncomments = ["old"]\n')
+    pkg = rd.packages.local_packages(tmp_path)["a"]
+    rd.trial.write_tests_table(pkg, rd.trial.ALL_PASS_TABLE)
+    # rust2rpm's default, said out loud: no comments to explain, the rest kept
+    assert cfg.read_text() == '[package]\nsummary = "A"\n\n[tests]\nrun = true\ncomments = []\n'
+    # rust2rpm's schema requires 'comments' in a [tests] table
+    assert tomllib.loads(cfg.read_text())["tests"] == {"run": True, "comments": []}
+    # the package leaves "Choose tests" and nothing is left to explain
+    assert rd.tui_overview.tui_stage(pkg).name == "srpm?"
+
+
 def test_tui_trial_actions_turns_verdicts_into_next_steps():
     rows = rd.tui_results.parse_trial_output([
         "== trial a 1.0 (log: /l/a.log)", "   all                      ok      2 passed, 0 failed",
