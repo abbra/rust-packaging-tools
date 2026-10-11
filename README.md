@@ -129,6 +129,31 @@ the other actions that fit, `n` starts something new from crate names or a
 project path, and `?` lists every command with all its options (forms
 generated from the same argparse metadata as `--help`).
 
+![The board: lifecycle stages with their packages and the next action](docs/screenshots/tui-board.png)
+
+*The board: every stage with its packages; pick some and press `enter` for the
+stage's action.*
+
+![A package: its checklist, next step and other actions](docs/screenshots/tui-package.png)
+
+*`d` on a package: what it has, the step it is at, and what to do next.*
+
+![The action sheet for Publish to COPR, filled from Settings](docs/screenshots/tui-action.png)
+
+*An action sheet: the inputs that matter, filled from Settings; the rest under
+More options; the exact command line below.*
+
+![A run summary: trial verdicts as a table and the next step](docs/screenshots/tui-run.png)
+
+*After a run: the verdict, the result as a table, and the next step — here
+test discovery found the unit tests broken and offers to write the `[tests]`
+table.*
+
+![The reason editor for skipped tests](docs/screenshots/tui-explain.png)
+
+*Explain test skips: the TODO reasons discovery wrote, edited in place; saving
+regenerates the spec.*
+
 The full workflow and reference is in
 [`fedora-rust-packaging/references/MANUAL.md`](fedora-rust-packaging/references/MANUAL.md).
 
