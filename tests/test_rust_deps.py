@@ -1104,6 +1104,26 @@ def test_adopted_package_builds_where_missing(tmp_path, monkeypatch):
     assert not pkg.builds_in("fedora-rawhide-x86_64")
 
 
+def test_review_takes_adopted_deps_from_the_chroot(tmp_path, monkeypatch):
+    for c in ("engine", "ciborium", "ciborium-io"):
+        make_package(tmp_path, c, f"rust-{c}", "0.2.2")
+    (tmp_path / "ciborium" / rd.config.DIST_GIT_FILE).write_text('package = "rust-ciborium"\n')
+    deps = {"engine": {"ciborium"}, "ciborium": {"ciborium-io"}, "ciborium-io": set()}
+    monkeypatch.setattr(rd.build, "build_deps", lambda p: deps[p.crate])
+    have = {"fedora-rawhide": {"0.2.2": {""}}, "rhel+epel-10": {}}
+    monkeypatch.setattr(rd.copr, "target_index", lambda chroot, refresh=False:
+                        rd.fedora.FedoraIndex({"ciborium": have[rd.fedora.chroot_release(chroot)]}))
+    monkeypatch.setattr(rd.review.shutil, "which", lambda _: "/usr/bin/fedora-review")
+    seen = {}
+    monkeypatch.setattr(rd.review, "review_one",
+                        lambda pkg, chroot, results, closure, local: seen.setdefault(chroot, closure) or True)
+    for chroot in ("fedora-rawhide-x86_64", "rhel+epel-10-x86_64"):
+        rd.review.cmd_review(argparse.Namespace(
+            root=tmp_path, crates=["engine"], all=False, localrepo=None, chroot=chroot))
+    # rawhide ships ciborium 0.2.2 (and so what it needs); EPEL 10 needs the local builds
+    assert seen == {"fedora-rawhide-x86_64": set(), "rhel+epel-10-x86_64": {"ciborium", "ciborium-io"}}
+
+
 # ─── dist-git updates ───────────────────────────────────────────────────────
 
 def test_update_message(tmp_path):

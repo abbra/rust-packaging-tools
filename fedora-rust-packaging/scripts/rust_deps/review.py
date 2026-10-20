@@ -158,6 +158,10 @@ def cmd_review(args) -> None:
         closure, todo = set(), list(deps.get(pkg.crate, ()))
         while todo:
             d = todo.pop()
+            # a package kept for other targets (dist-git.toml, targets.toml) comes
+            # from the chroot's own repositories here, with its dependencies
+            if d in local and not local[d].builds_in(args.chroot):
+                continue
             if d not in closure:
                 closure.add(d)
                 todo += deps.get(d, ())
