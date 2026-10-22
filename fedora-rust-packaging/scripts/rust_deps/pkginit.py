@@ -429,14 +429,17 @@ def cmd_init(args) -> None:
         ]
         util.info("Packages to create: " + ", ".join(f"{c} {r[1:]}" for c, r in queue))
     planned = {
-        n: packages.LocalPackage(n, root / n, r.lstrip("="))
+        n: packages.LocalPackage(n, root / f"rust-{n}", r.lstrip("="))
         for n, r in queue
         if r.startswith("=")
     }
     created, failed = [], []
     for name, req in queue:
         local = {**planned, **packages.local_packages(root)}
-        d = root / name
+        d = root / f"rust-{name}"
+        legacy = root / name
+        if (legacy / "rust2rpm.toml").exists() and not (d / "rust2rpm.toml").exists():
+            d = legacy  # pre-dates the rust-<crate> convention; don't duplicate it
         if (d / "rust2rpm.toml").exists() and not args.force:
             util.info(f"== {name}: already initialized in {d} (use --force to redo)")
             if host and (d / config.TARGETS_FILE).exists():

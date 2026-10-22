@@ -39,13 +39,14 @@ call it by its full path.
 
 ## Layout
 
-Each package lives in its own directory, named after the crate, under a
-*packages root*. The root is `--root DIR`, else `$RUST_DEPS_ROOT`, else the
-current directory. The tool itself can live anywhere.
+Each package lives in its own directory, named `rust-<crate>` by Fedora
+convention, under a *packages root*. The root is `--root DIR`, else
+`$RUST_DEPS_ROOT`, else the current directory. The tool itself can live
+anywhere.
 
 ```
 ~/src/packages/                    packages root (any directory)
-└── jsonschema/
+└── rust-jsonschema/
     ├── rust2rpm.toml              rust2rpm configuration: summary, [tests], license
     │                              sources, cargo-toml-patch-comments …
     ├── cargo-toml-edits.toml      declarative Cargo.toml changes (see below)
@@ -96,7 +97,7 @@ $T regen jsonschema
 
 # 4. Pick the tests that can run in Fedora.
 $T trial --discover --apply jsonschema      # writes [tests] with TODO comments
-$EDITOR jsonschema/rust2rpm.toml            # replace TODOs with real reasons
+$EDITOR rust-jsonschema/rust2rpm.toml       # replace TODOs with real reasons
 $T regen jsonschema && $T trial jsonschema  # runs exactly what %check will run
 
 # 5. Build SRPMs, check %prep and rpmlint.
@@ -190,7 +191,7 @@ graph at `regen`.
 | `dist-git CRATE…\|--all [--dir DIR] [--branch B] [--push] [-n]` | For adopted packages whose version here is newer than dist-git's: clone (or fetch) the package's dist-git repository into DIR (`--dir`, else `$RUST_DEPS_DIST_GIT`), check that the branch (by default, the one recorded in each package's `dist-git.toml`; `--branch B` overrides it) is still at the commit `adopt` took, and commit the update on a local branch `update-<version>`: the spec, `rust2rpm.toml`, patches, local sources and the tmt tests, with the URL sources in `sources` (`fedpkg new-sources --offline`). The commit message is the `%autochangelog` entry. Nothing leaves the machine. With `--push`, fork the repository (`fedpkg fork`), upload the sources to the lookaside cache and push the branch to the fork; it prints the URL that opens the pull request. See "Dist-git updates". |
 | `review-plan CRATE…\|--all [--project P] [-r CHROOT] [--json]` | Read-only. What to submit to Fedora, in which order: the packages by build stage, each as a **review** (a new package: its ticket is FILED, its draft is READY with its path, or it is NOT READY with what is missing), an **update** (Fedora has the package: a pull request to its dist-git, with Rawhide's versions), or needing nothing (`targets.toml`). `after:` names the packages whose tickets or updates it waits for. With `--project`, a READY draft also needs the COPR build of the local spec. With `--all`, it lists other specs in the root too. |
 | `review-request CRATE…\|--all --project P --fas NAME [-r CHROOT] [--needs-sponsor] [--comment TEXT] [--koji-task CRATE=TASK]… [--file]` | Prepare the Bugzilla review request of each package, in dependency order, from its latest succeeded COPR build (chroot default `fedora-rawhide-x86_64`). Requires a passing `review` of the current SRPM and a published spec identical to the local one. Writes `review-request.txt`. `--koji-task` adds a link to a successful Koji scratch build of that crate's SRPM (checked through Koji). With `--file`, files it (or, if already filed, posts the new Spec/SRPM URLs) and records the bug in `review-request.json`. See "Submitting to Fedora". |
-| `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
+| `review-status CRATE…\|--all [--comments N] [--record]`, or `review-status --user LOGIN [--closed] [--comments N]` | Read-only. For each package, show its review ticket (from `review-request.json`, or found by summary; `--record` stores it): status, `fedora-review` flag, reviewer, whiteboard, dependency tickets, NEEDINFO, comments from people since the submitter's last one (up to N, default 5; all are saved to `rust-<crate>/review-bug-<id>.txt`), the review bot's latest result, and the next step. For approved tickets it checks Koji for a completed build (then: close the ticket). With `--user`, it reports every open (with `--closed`, every) Package Review ticket filed by that Bugzilla user instead, and keeps its state in `~/.cache/rust-packaging-tools/review-status/LOGIN/` (see "Submitting to Fedora"). |
 | `doctor` | Check required and optional tools, the `mock` group, user namespaces, and the packages root. |
 | `status [CRATE…] [-r RELEASE]… [--project P] [--all-versions]` | Show the packaged version against crates.io and against Fedora and EPEL releases: one column per release, named after it. Without `-r`, the host's release (e.g. `fedora-45`). `-r` takes a release (`fedora-44`, `fedora-rawhide`, `rhel+epel-10` for COPR's EPEL, `epel-10` for EPEL itself) or a chroot, and can be repeated; `--project` adds every release the COPR project builds for. A cell shows the newest version the release has, `=` when it is the one packaged here, and `(+N)` for older ones; `--all-versions` lists them. Also shows compat packages, the targets from `targets.toml`, and whether a patch and an SRPM exist. |
 | `tui` | A guided text UI over the whole workflow (needs `python3-textual`): a board of the lifecycle stages (see "Workflows") with their packages and the action that moves them on; action sheets with only the inputs that matter, filled from per-root settings (COPR project, chroots, FAS account) and the rest under *More options*; runs that end in a summary — verdict, `ACTION NEEDED` items, the result as a table, next steps; and every command with all its options under "All commands", generated from the same argparse metadata as `--help`. See "Text UI". |
@@ -448,7 +449,7 @@ Steps:
    The stages are chained, so each package builds against the ones it needs.
    If a build fails, `copr-status` shows why (see "COPR build failures").
 3. `review-request --all --project <owner/project> --fas <account>` writes
-   `<crate>/review-request.txt` for each package. It contains the ticket
+   `rust-<crate>/review-request.txt` for each package. It contains the ticket
    summary (`Review Request: rust-<crate> - <Summary>`) and the first comment:
    `Spec URL`, `SRPM URL` (from COPR: `…/srpm-builds/<id>/<srpm>` and
    `…/<chroot>/<id>-rust-<crate>/rust-<crate>.spec`), `Upstream URL`,
