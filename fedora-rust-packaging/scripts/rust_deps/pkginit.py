@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import functools
+import hashlib
 import json
 import re
 import time
@@ -408,6 +409,15 @@ def add_target(pkg_dir: Path, chroot: str) -> None:
     )
 
 
+def write_sources_file(pkg_dir: Path, crate_file: Path) -> None:
+    """The dist-git 'sources' lookaside record (fedpkg new-sources format) for the crate archive."""
+    sources = pkg_dir / "sources"
+    if sources.is_symlink():
+        util.die(f"{sources}: refusing to write through a symlink")
+    digest = hashlib.sha512(crate_file.read_bytes()).hexdigest()
+    sources.write_text(f"SHA512 ({crate_file.name}) = {digest}\n")
+
+
 def cmd_init(args) -> None:
     index = fedora.fedora_index(args.refresh, args.target)
     host = fedora.fedora_index(args.refresh) if args.target else None
@@ -452,6 +462,7 @@ def cmd_init(args) -> None:
         util.info(f"== {name} {version}")
         d.mkdir(parents=True, exist_ok=True)
         crate_file = cratesio.download_crate(name, version, d)
+        write_sources_file(d, crate_file)
         toml = tomllib.loads(archives.read_crate_member(crate_file, "Cargo.toml"))
         declared, notes = suggest_edits(toml, index, local)
         lic_names, lic_urls, lic_notes = license_sources(crate_file, toml)
