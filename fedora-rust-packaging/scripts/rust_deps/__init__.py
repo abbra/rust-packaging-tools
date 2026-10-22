@@ -1,6 +1,6 @@
 """rust-deps — package Rust crates (and their missing dependencies) for Fedora.
 
-Every package lives in <root>/<crate>/ and is driven by rust2rpm:
+Every package lives in <root>/rust-<crate>/ and is driven by rust2rpm:
 
     rust2rpm.toml             rust2rpm configuration (summary, tests, license
                               sources, cargo-toml-patch-comments, ...)

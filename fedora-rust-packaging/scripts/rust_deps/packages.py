@@ -1,4 +1,4 @@
-"""rust-deps local packages: the <root>/<crate> tree and its selection."""
+"""rust-deps local packages: the <root>/rust-<crate> tree and its selection."""
 
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ def local_packages(root: Path) -> dict[str, LocalPackage]:
     for d in sorted(p for p in root.iterdir() if p.is_dir()):
         if not (d / "rust2rpm.toml").exists():
             continue
-        crate, version, name = d.name, None, None
+        crate, version, name = d.name.removeprefix("rust-"), None, None
         specs = sorted(d.glob("rust-*.spec"), key=lambda f: f.stat().st_mtime)
         if len(specs) > 1:
             util.warn(
@@ -121,7 +121,7 @@ def select(root: Path, names: list[str], all_: bool) -> list[LocalPackage]:
     for n in names:
         if n not in pkgs:
             util.die(
-                f"{n}: no package in {root / n} (wrong --root? or run 'rust-deps init {n}' first)"
+                f"{n}: no package in {root / f'rust-{n}'} (wrong --root? or run 'rust-deps init {n}' first)"
             )
         out.append(pkgs[n])
     return out

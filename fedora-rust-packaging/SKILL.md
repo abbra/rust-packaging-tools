@@ -57,7 +57,7 @@ Read them as follows (forms can be combined with `--root <dir>`):
 
 ## Setup
 
-1. **Packages root.** Each package lives in `<root>/<crate>/`. Use the directory
+1. **Packages root.** Each package lives in `<root>/rust-<crate>/`. Use the directory
    the user names. If they name none, ask, and suggest an existing tree of
    such packages or a new one (e.g. `~/src/packages`). Never guess, and never
    use the skill's own directory. Pass it on every call:
@@ -249,7 +249,7 @@ Read them as follows (forms can be combined with `--root <dir>`):
    - With approval, `$T copr --all --project <p> -r fedora-rawhide-x86_64
      --wait`.
    - `$T review-request --all --project <p> --fas <name>` writes drafts to
-     `<crate>/review-request.txt`. Show them to the user. The review bot may
+     `rust-<crate>/review-request.txt`. Show them to the user. The review bot may
      not respond (it has not since 2026-08-28), so the request carries its
      own build evidence: the COPR build link, and for a user in the
      `packager` group, with approval, a Koji scratch build
@@ -261,7 +261,7 @@ Read them as follows (forms can be combined with `--root <dir>`):
      reviewers' comments that were not answered yet, open NEEDINFO requests,
      the review bot's result, and the next step. Run it whenever the user asks
      about the reviews. Read the full thread in
-     `<crate>/review-bug-<id>.txt` before acting on a comment, and summarize
+     `rust-<crate>/review-bug-<id>.txt` before acting on a comment, and summarize
      for the user what each reviewer asks.
    - A ticket with `fedora-review+`, in RELEASE_PENDING (set when the dist-git
      repository is created) or CLOSED is a **finished review**: the package

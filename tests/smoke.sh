@@ -71,21 +71,21 @@ grep -qE "^(NEW|UPDATE|SYSTEM|PACKAGED|FEATURES)[[:space:]]+$crate " "$root/work
 step "init $crate (test discovery ran)"
 "${T[@]}" init --apply-tests "$crate@=$version" | tee "$root/init.out"
 grep -qE 'Suggested \[tests\] table|all test targets pass' "$root/init.out"
-test -f "$root/$crate/rust-$crate.spec"
-test -f "$root/$crate/$crate-$version.crate"
-spec_version=$(sed -n 's/^Version: *//p' "$root/$crate/rust-$crate.spec")
+test -f "$root/rust-$crate/rust-$crate.spec"
+test -f "$root/rust-$crate/$crate-$version.crate"
+spec_version=$(sed -n 's/^Version: *//p' "$root/rust-$crate/rust-$crate.spec")
 [[ $spec_version == "$version" ]] || { echo "spec Version is '$spec_version', expected '$version'" >&2; exit 1; }
 
 step "regen $crate"
 "${T[@]}" regen "$crate"
 
 step "trial $crate (the spec's %cargo_test runs)"
-grep -q '%cargo_test' "$root/$crate/rust-$crate.spec"
+grep -q '%cargo_test' "$root/rust-$crate/rust-$crate.spec"
 "${T[@]}" trial "$crate"
 
 step "srpm $crate (sources, %prep, rpmlint)"
 "${T[@]}" srpm "$crate"
-compgen -G "$root/$crate/rust-$crate-$version-*.src.rpm" >/dev/null \
+compgen -G "$root/rust-$crate/rust-$crate-$version-*.src.rpm" >/dev/null \
     || { echo "no SRPM built for $crate $version" >&2; exit 1; }
 
 step order
