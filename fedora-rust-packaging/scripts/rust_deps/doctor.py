@@ -12,6 +12,7 @@ from . import util
 REQUIRED_TOOLS = {
     "rust2rpm": "rust2rpm",
     "cargo": "cargo",
+    "git": "git",
     "rpmbuild": "rpm-build",
     "spectool": "rpmdevtools",
     "rpmlint": "rpmlint",

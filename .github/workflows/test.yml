@@ -55,6 +55,11 @@ jobs:
           git-core python3 rust2rpm cargo2rpm cargo rust rpm-build rpmdevtools rpmlint
           redhat-rpm-config patch util-linux-core iproute
       - uses: actions/checkout@v4
+      - name: Configure git identity
+        # init_git commits the newly created package; the container has none configured
+        run: |
+          git config --global user.name "rust-deps smoke test"
+          git config --global user.email "rust-deps-smoke@localhost"
       - name: rust-deps --help
         run: fedora-rust-packaging/scripts/rust-deps --help
       - name: Smoke test

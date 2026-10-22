@@ -7,6 +7,7 @@ import functools
 import hashlib
 import json
 import re
+import shutil
 import time
 import tomllib
 import urllib.error
@@ -16,6 +17,7 @@ import urllib.request
 from . import archives
 from . import config
 from . import cratesio
+from . import distgit
 from . import edits
 from . import fedora
 from . import packages
@@ -418,7 +420,34 @@ def write_sources_file(pkg_dir: Path, crate_file: Path) -> None:
     sources.write_text(f"SHA512 ({crate_file.name}) = {digest}\n")
 
 
+def check_git_identity() -> None:
+    """Fail before any package work starts if git can't make a commit."""
+    if shutil.which("git") is None:
+        util.die("git: not found (dnf install git)")
+    res = util.run(["git", "var", "GIT_AUTHOR_IDENT"], capture_output=True)
+    if res.returncode:
+        util.die(f"git: no usable author identity configured:\n{res.stderr}")
+
+
+def init_git(pkg_dir: Path, version: str, created: set[str]) -> None:
+    """git init a freshly created package directory and commit its initial state."""
+    if distgit.git(pkg_dir, "rev-parse", "-q", "--verify", "HEAD", check=False).returncode == 0:
+        return  # already has an initial commit
+    gitignore = pkg_dir / ".gitignore"
+    if gitignore.is_symlink():
+        util.die(f"{gitignore}: refusing to write through a symlink")
+    lines = gitignore.read_text().splitlines() if gitignore.exists() else []
+    for pattern in ("*.rpm", "*.crate"):
+        if pattern not in lines:
+            lines.append(pattern)
+    gitignore.write_text("\n".join(lines) + "\n")
+    distgit.git(pkg_dir, "init", "-q")
+    distgit.git(pkg_dir, "add", "--", ".gitignore", *sorted(created))
+    distgit.git(pkg_dir, "commit", "-q", "-m", f"Initial package version {version}")
+
+
 def cmd_init(args) -> None:
+    check_git_identity()
     index = fedora.fedora_index(args.refresh, args.target)
     host = fedora.fedora_index(args.refresh) if args.target else None
     root: Path = args.root
@@ -461,6 +490,7 @@ def cmd_init(args) -> None:
         version = v["num"]
         util.info(f"== {name} {version}")
         d.mkdir(parents=True, exist_ok=True)
+        pre_existing = {p.name for p in d.iterdir()}
         crate_file = cratesio.download_crate(name, version, d)
         write_sources_file(d, crate_file)
         toml = tomllib.loads(archives.read_crate_member(crate_file, "Cargo.toml"))
@@ -476,6 +506,7 @@ def cmd_init(args) -> None:
             add_target(d, args.target)
         pkg = packages.LocalPackage(name, d, None)
         if regen.regen(pkg, version, compat=args.compat):
+            init_git(d, version, {p.name for p in d.iterdir()} - pre_existing)
             created.append(pkg)
         else:
             failed.append(name)
