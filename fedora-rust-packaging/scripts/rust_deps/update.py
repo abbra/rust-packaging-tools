@@ -179,6 +179,7 @@ def cmd_update(args) -> None:
             )
             old_sha = pkginit.vcs_commit(old_crate)
         new_crate = cratesio.download_crate(pkg.crate, version, pkg.dir)
+        pkginit.write_sources_file(pkg.dir, new_crate)
         missing = repin_upstream_sources(pkg, old_sha, pkginit.vcs_commit(new_crate))
         for url in missing:
             util.action(

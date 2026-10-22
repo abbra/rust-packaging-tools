@@ -161,6 +161,8 @@ def regen(
         for old in pkg.dir.glob(f"{pkg.crate}-*.crate"):
             if old.name != f"{pkg.crate}-{new.version}.crate":
                 old.unlink()
+        if new.crate_file.exists():
+            pkginit.write_sources_file(pkg.dir, new.crate_file)
         requires = cfg.get("requires", {})
         if new.crate_file.exists() and not (
             requires.get("build") or requires.get("lib")
