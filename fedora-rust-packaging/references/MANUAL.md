@@ -789,7 +789,7 @@ so ask first. `copr-status` keeps the conflict `BLOCKED` until it is gone.
 | no local fedora-review result / older than the SRPM / unexplained issues (`review-request`) | Run `review` for the package (again) and fix its `[!]` findings first. |
 | COPR project … has no package / no succeeded build / build is V, the local package is W / spec differs (`review-request`) | The COPR build must be of exactly the local spec: `srpm`, then `copr <crate> --project … --wait`. |
 | depends on rust-X, which has no review request yet (`review-request --file`) | File the dependency's ticket first; `--all` does it in dependency order. |
-| UPDATE in `resolve` | Fedora already ships the crate, at a version that does not match. In a COPR, packaging the new version is fine. For Fedora itself, update the existing package (check what else depends on it) or create a compat package (`rust2rpm --compat`). |
+| UPDATE in `resolve` | Fedora already ships the crate, at a version that does not match. Try `[set-version]` in the consumer's `cargo-toml-edits.toml` to pin the dependency down to Fedora's version first, and confirm with `trial`. Only if that fails: in a COPR, packaging the new version is fine; for Fedora itself, clone the existing package (`dist-git`), update it and open a pull request for it (check what else depends on it first), or create a compat package (`rust2rpm --compat`). |
 
 Typical reasons tests cannot run, and how to express them in `[tests]`:
 - **Needs a dev-dependency that is not packaged:** remove that target from `run`.

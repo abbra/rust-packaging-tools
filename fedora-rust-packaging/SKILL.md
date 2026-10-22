@@ -90,6 +90,12 @@ Read them as follows (forms can be combined with `--root <dir>`):
   version (e.g. `^0.57` while 0.58 exists), test the consumer against the new
   version. If it works, patch the consumer's requirement rather than packaging
   the old version.
+- **An UPDATE (a consumer needs a version newer than Fedora's package):
+  try Fedora's version first.** Pin the consumer's requirement down to it with
+  `[set-version]` in `cargo-toml-edits.toml` and confirm with `trial`. Only
+  when that fails: clone the Fedora package (`dist-git`), update it, and open
+  a pull request for it (see "Updates of adopted packages" below), or make a
+  compat package.
 - **Keep tests running where possible.** Prefer `[set-dev-version]` to Fedora's
   version over dropping a dev-dependency. Prefer skipping individual tests over
   disabling a whole target. Disable a target when it cannot compile, needs data

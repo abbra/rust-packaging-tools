@@ -556,7 +556,9 @@ def cmd_resolve(args) -> None:
         "NEW: package it with 'rust-deps init <crate>' (or 'init --recursive' for everything)."
     )
     util.info(
-        "UPDATE: Fedora ships another version; update that package or create a compat package."
+        "UPDATE: Fedora ships another version; try pinning the dependency to it first "
+        "([set-version] + trial). Only if that fails: clone that package, update it and "
+        "open a pull request for it, or create a compat package."
     )
     util.info(
         "FEATURES: the Fedora package lacks feature subpackages (check its Cargo.toml patch)."
