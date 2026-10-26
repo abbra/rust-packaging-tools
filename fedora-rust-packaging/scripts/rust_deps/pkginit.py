@@ -506,7 +506,11 @@ def cmd_init(args) -> None:
             add_target(d, args.target)
         pkg = packages.LocalPackage(name, d, None)
         if regen.regen(pkg, version, compat=args.compat):
-            init_git(d, version, {p.name for p in d.iterdir()} - pre_existing)
+            # .crate/.rpm files are gitignored by init_git; don't pass them to
+            # git add, or it fails on the explicit, now-ignored pathspec
+            new_files = {p.name for p in d.iterdir()} - pre_existing
+            new_files -= {n for n in new_files if n.endswith((".crate", ".rpm"))}
+            init_git(d, version, new_files)
             created.append(pkg)
         else:
             failed.append(name)
