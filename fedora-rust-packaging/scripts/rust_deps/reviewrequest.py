@@ -7,6 +7,7 @@ import json
 import os
 import re
 import textwrap
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,7 +26,7 @@ FE_NEEDSPONSOR = (
     177841  # tracker bug: review requests from contributors who need a sponsor
 )
 REQUEST_STATE = "review-request.json"  # {"bug": N, "spec_url": ..., "srpm_url": ...}
-REPO_REQUEST = "repo-request.json"  # {"bug": N, "requested": "..."} after 'fedpkg request-repo'
+REPO_REQUEST = "repo-request.json"  # {"bug": N, "requested": "..."}: after 'fedpkg request-repo', or what dist-git confirmed
 REQUEST_DRAFT = "review-request.txt"
 
 
@@ -48,6 +49,29 @@ def spec_query(spec: Path, fmt: str) -> str:
 def request_state(pkg: packages.LocalPackage) -> dict:
     f = pkg.dir / REQUEST_STATE
     return json.loads(f.read_text()) if f.exists() else {}
+
+
+def repo_requested(pkg: packages.LocalPackage) -> bool:
+    """Whether the dist-git repository of this package was requested here: the mark
+    'request-repo' leaves, or, for a request filed before marks existed, what dist-git
+    answers. A yes is written into the mark, so an existing repository is asked about
+    once; a no is not, so a pending request is noticed as soon as it is granted."""
+    mark = pkg.dir / REPO_REQUEST
+    if mark.exists():
+        return True
+    bug = request_state(pkg).get("bug")
+    if not bug:
+        return False  # no review filed here: a repository of the same name is not ours
+    try:
+        _get(f"https://src.fedoraproject.org/api/0/rpms/{pkg.rpm_name}")
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise  # a failed lookup is not proof that the repository is missing
+        return False
+    mark.write_text(
+        json.dumps({"bug": bug, "requested": time.strftime("%Y-%m-%d")}, indent=2) + "\n"
+    )
+    return True
 
 
 def copr_review_urls(

@@ -263,7 +263,7 @@ def prepare_update(
     repository: on the branch it was adopted from for an adopted package, on rawhide of the
     empty repository that was just requested for a new one; 'branch' names another."""
     dg = pkg.dist_git or {}
-    requested = not dg and (pkg.dir / reviewrequest.REPO_REQUEST).exists()
+    requested = not dg and reviewrequest.repo_requested(pkg)
     if not dg and not requested:
         util.action(
             f"{pkg.crate}: not in Fedora and no repository was requested; 'adopt' an existing one"
@@ -609,7 +609,7 @@ def cmd_dist_git(args) -> None:
             p
             for p in pkgs
             if (p.dist_git and p.dist_git.get("packaging") != "local")
-            or (p.dir / reviewrequest.REPO_REQUEST).exists()
+            or reviewrequest.repo_requested(p)
         ]
     pkgs = (
         [p for s in build.build_stages(pkgs, args.root, warn_outside=False) for p in s]

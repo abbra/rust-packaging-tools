@@ -272,7 +272,7 @@ def review_ticket_report(
                 f"built in Koji as {nvr} ; close the ticket as NEXTRELEASE "
                 "(a Bodhi update that names it closes it when it reaches stable)"
             )
-        if pkg and (pkg.dir / reviewrequest.REPO_REQUEST).exists():
+        if pkg and reviewrequest.repo_requested(pkg):
             # a repository our request created is empty: 'dist-git' imports into it
             put = f"'dist-git {crate}' clones it and puts the local packaging there"
         else:
