@@ -98,6 +98,16 @@ def review_plan(
                     "Rawhide has the crate, so there is nothing to review",
                     [],
                 )
+            elif (pkg.dir / reviewrequest.REPO_REQUEST).exists() and dist_git_has(pkg.rpm_name):
+                # an empty repository our approved review created: no adoption, no PR
+                item = PlanItem(
+                    pkg,
+                    "update",
+                    "",
+                    f"the repository requested for {pkg.rpm_name} is there: 'dist-git {pkg.crate}'"
+                    " clones it and commits the packaging there",
+                    [],
+                )
             elif dist_git_has(pkg.rpm_name):
                 item = PlanItem(
                     pkg,

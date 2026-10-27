@@ -272,22 +272,23 @@ def review_ticket_report(
                 f"built in Koji as {nvr} ; close the ticket as NEXTRELEASE "
                 "(a Bodhi update that names it closes it when it reaches stable)"
             )
-        if bug["status"] == "RELEASE_PENDING":
-            return (
-                f"approved, repository created: fedpkg clone {rpm_name}; import the SRPM, add the tmt "
-                "files (.fmf plans tests) and build"
+        if pkg and (pkg.dir / reviewrequest.REPO_REQUEST).exists():
+            # a repository our request created is empty: 'dist-git' imports into it
+            put = f"'dist-git {crate}' clones it and puts the local packaging there"
+        else:
+            put = (
+                f"fedpkg clone {rpm_name}; import the SRPM, add the tmt files (.fmf plans tests) and build"
             )
+        if bug["status"] == "RELEASE_PENDING":
+            return f"approved, repository created: {put}"
         try:
             reviewrequest._get(f"https://src.fedoraproject.org/api/0/rpms/{rpm_name}")
-            return (
-                f"approved, repository exists: fedpkg clone {rpm_name}; import the SRPM, add the tmt "
-                "files (.fmf plans tests) and build"
-            )
+            return f"approved, repository exists: {put}"
         except urllib.error.HTTPError:
             if pkg and (pkg.dir / reviewrequest.REPO_REQUEST).exists():
                 return (
-                    "the repository request is pending: wait for the scm-request ticket to be closed,"
-                    f" then fedpkg clone {rpm_name}, import the SRPM and build"
+                    "the repository request is pending: 'dist-git' clones and fills it as soon as the"
+                    " scm-request ticket is closed"
                 )
             return (
                 f"approved: request the dist-git repository: 'request-repo {crate or rpm_name}'"

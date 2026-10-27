@@ -122,6 +122,13 @@ TUI_STAGES = [
         "Fedora already has these: prepare the update commit for dist-git.",
     ),
     TuiStage(
+        "requested",
+        lambda p: (p.dir / reviewrequest.REPO_REQUEST).exists(),
+        "dist-git",
+        "Approved, importing",
+        "The review was approved and the repository requested: 'dist-git' clones it and puts the packaging there once it exists.",
+    ),
+    TuiStage(
         "targets",
         lambda p: p.targets is not None,
         "copr",
@@ -160,6 +167,7 @@ BOARD_ORDER = [
     "review",
     "draft",
     "filed",
+    "requested",
     "adopted",
     "targets",
 ]
@@ -201,6 +209,8 @@ def package_checklist(pkg: packages.LocalPackage) -> list[tuple[str, str]]:
     ]
     if pkg.dist_git is not None:
         items.append((False, "adopted", "dist-git update"))
+    elif (pkg.dir / reviewrequest.REPO_REQUEST).exists():
+        items.append((False, "requested", "dist-git import"))
     elif pkg.targets is not None:
         items.append((False, "targets", "COPR build"))
     else:

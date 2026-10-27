@@ -1289,7 +1289,7 @@ def test_request_repo_never_reruns_fedpkg_without_a_need(tmp_path, monkeypatch, 
     stub_bug_and_repo(monkeypatch, "+", True)
     assert rd.distgit.request_repo(pkg, False) is True
     assert calls == []
-    assert "already exists" in capsys.readouterr().out
+    assert "the repository exists: 'dist-git zmij'" in capsys.readouterr().out
     # a failed lookup (not 404) is an error, not proof that the repository is missing
     def get(url):
         raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
@@ -1314,6 +1314,49 @@ def test_request_repo_rechecks_the_flag_before_submitting(tmp_path, monkeypatch,
     assert rd.distgit.request_repo(pkg, False) is False
     assert calls == []
     assert "no longer approved" in actions[0]
+
+def test_a_requested_repository_is_imported_into_dist_git(tmp_path, monkeypatch, capsys):
+    """After the request is granted, 'dist-git' clones the empty repository and commits
+    the local packaging on rawhide; 'dist-git --push' pushes rawhide to origin itself,
+    without a fork, and records the package as adopted."""
+    import subprocess
+    def sh(*a, cwd):
+        return subprocess.run(a, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+    for var in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        monkeypatch.setenv(var, "/dev/null")
+    for var, val in (("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"),
+                     ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")):
+        monkeypatch.setenv(var, val)
+    (tmp_path / "rpms").mkdir()
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "rawhide",
+                    str(tmp_path / "rpms" / "rust-zmij.git")], check=True)
+    d = make_package(tmp_path, "zmij", "rust-zmij", "1.0.23")
+    (d / rd.reviewrequest.REPO_REQUEST).write_text('{"bug": 2401234, "requested": "2026-10-27"}\n')
+    top = tmp_path / "fedora"
+    monkeypatch.setattr(rd.distgit, "DIST_GIT", f"file://{tmp_path}")
+    pkg = rd.packages.local_packages(tmp_path)["zmij"]
+    # a dry run describes the import without cloning
+    assert rd.distgit.prepare_update(pkg, top, None, True) is True
+    assert "rawhide, which the request left empty" in capsys.readouterr().out
+    assert not (top / "rust-zmij").exists()
+    # the real import: clone the empty repository, commit the packaging on rawhide
+    monkeypatch.setattr(rd.distgit, "update_files", lambda pkg: ({pkg.spec.name: pkg.spec}, []))
+    assert rd.distgit.prepare_update(pkg, top, None, False) is True
+    assert sh("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=top / "rust-zmij") == "rawhide"
+    assert sh("git", "show", "--format=%s", "-s", "HEAD", cwd=top / "rust-zmij") == "New package: rust-zmij 1.0.23"
+    assert not (d / rd.config.DIST_GIT_FILE).exists()  # not in Fedora until it is pushed
+    # the push: rawhide to origin itself, no fork
+    monkeypatch.setattr(rd.distgit.shutil, "which", lambda name: "/usr/bin/fedpkg")
+    assert rd.distgit.push_update(pkg) is True
+    assert sh("git", "rev-parse", "rawhide", cwd=tmp_path / "rpms" / "rust-zmij.git") == sh(
+        "git", "rev-parse", "HEAD", cwd=top / "rust-zmij")
+    assert sh("git", "remote", cwd=top / "rust-zmij") == "origin"
+    assert "pushed rawhide to origin" in capsys.readouterr().out
+    # afterwards it is an ordinary adopted dist-git package
+    pkg = rd.packages.local_packages(tmp_path)["zmij"]
+    assert pkg.dist_git["commit"] == sh("git", "rev-parse", "HEAD", cwd=top / "rust-zmij")
+    assert rd.distgit.prepare_update(pkg, top, None, False) is True
+    assert "no changes against dist-git" in capsys.readouterr().out
 
 
 # ─── CLI wiring ──────────────────────────────────────────────────────────────

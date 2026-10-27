@@ -217,9 +217,9 @@ rust-deps request-repo --all                     # after approval: ask for the d
 Beyond the pipeline above: `status --project username/repo` compares local
 packages against crates.io and each Fedora/EPEL release; `update CRATE
 --version V` moves a package to a new upstream release, in build order;
-`dist-git --dir ~/src/fedora zmij` prepares an update for a package already
-in Fedora, committed in its dist-git checkout; `tmt --all --project
-username/repo -r fedora-45-x86_64` runs the generated Fedora CI tests (add
+`dist-git --dir ~/src/fedora zmij` puts the local packaging in Fedora's repository: an
+update commit for a package already in Fedora, or the import into one your request created;
+`tmt --all --project username/repo -r fedora-45-x86_64` runs the generated Fedora CI tests (add
 `--host` from inside a toolbox container); `review-status --user username`
 lists all your review tickets, tracked in `~/.cache`. Run `rust-deps COMMAND
 --help` for any command's full options, or see the reference below.
@@ -236,9 +236,9 @@ rust-deps tui
 
 It opens on a **board**: the stages a package goes through — *Needs a spec*,
 *Choose tests*, *Explain test skips*, *Build SRPM*, *Ready for review*,
-*Draft ready to file*, *Filed, in review*, and the *Update in dist-git* and
-*Publish to COPR* branches — each with the packages it holds and the one
-action that moves them on. Pick packages with `space` and press `enter`: an
+*Draft ready to file*, *Filed, in review*, *Approved, importing*, and the
+*Update in dist-git* and *Publish to COPR* branches — each with the packages it
+holds and the one action that moves them on. Pick packages with `space` and press `enter`: an
 **action sheet** shows the few inputs that matter, filled from **Settings**
 asked once per root (COPR project, chroots, FAS account; kept in
 `~/.cache/rust-packaging-tools`), everything else folded under *More

@@ -209,12 +209,15 @@ def update_message(
     pkg: packages.LocalPackage, old_spec: str, old_config: str, added: list[str]
 ) -> str:
     """A commit message (and so, with %autochangelog, the changelog entry) for the update."""
-    old_version = (re.search(r"^Version:\s+(\S+)", old_spec, re.M) or [None, None])[1]
-    subject = (
-        f"Update to {pkg.version}"
-        if old_version != pkg.version
-        else "Update the packaging"
-    )
+    if not old_spec:
+        subject = f"New package: {pkg.rpm_name} {pkg.version}"
+    else:
+        old_version = (re.search(r"^Version:\s+(\S+)", old_spec, re.M) or [None, None])[1]
+        subject = (
+            f"Update to {pkg.version}"
+            if old_version != pkg.version
+            else "Update the packaging"
+        )
     old = set(toml_comments(old_config))
     lines = [c for c in toml_comments(pkg.config_file.read_text()) if c not in old]
     if any(a.startswith(("plans/", "tests/rust-deps/", ".fmf/")) for a in added):
@@ -233,25 +236,8 @@ def git(checkout: Path, *args: str, check: bool = True) -> subprocess.CompletedP
     return res
 
 
-def prepare_update(
-    pkg: packages.LocalPackage, top: Path, branch: str | None, dry_run: bool
-) -> bool:
-    """A local commit in a dist-git checkout that updates the Fedora package to the local packaging,
-    on the branch it was adopted from unless 'branch' names another."""
-    dg = pkg.dist_git or {}
-    if not dg:
-        util.action(
-            f"{pkg.crate}: not adopted from dist-git; run 'adopt {pkg.crate}' first"
-        )
-        return False
-    adopted = dg.get("branch", "rawhide")
-    branch = branch or adopted
-    if dg.get("packaging") == "local":
-        util.action(
-            f"{pkg.crate}: marked with --mark-only, its packaging is for other targets; to propose "
-            f"it to Fedora, 'adopt {pkg.crate}' without --mark-only"
-        )
-        return False
+def ensure_checkout(top: Path, pkg: packages.LocalPackage, dry_run: bool) -> Path | None:
+    """The dist-git checkout of the package under top: clone it if missing, else fetch origin."""
     name = pkg.rpm_name
     checkout = top / name
     if not (checkout / ".git").exists():
@@ -264,34 +250,81 @@ def prepare_update(
             )
             if res.returncode:
                 util.action(f"{pkg.crate}: cannot clone {name}: {res.stderr.strip()}")
-                return False
+                return None
     elif not dry_run:
         git(checkout, "fetch", "-q", "origin")
-    if dry_run:
-        util.info(
-            f"   would prepare branch update-{pkg.version} of {checkout} from origin/{branch}"
-        )
-        return True
-    head = git(checkout, "rev-parse", f"origin/{branch}").stdout.strip()
-    if branch != adopted:
-        # the recorded commit is on another branch: nothing to compare with
-        util.warn(
-            f"{pkg.crate}: adopted from dist-git {adopted}, updating {branch} as asked; "
-            f"its packaging may differ from {adopted}'s"
-        )
-    elif dg.get("commit") and head != dg["commit"]:
-        log = git(
-            checkout, "log", "--oneline", f"{dg['commit']}..{head}", check=False
-        ).stdout.strip()
+    return checkout
+
+
+def prepare_update(
+    pkg: packages.LocalPackage, top: Path, branch: str | None, dry_run: bool
+) -> bool:
+    """A local commit in a dist-git checkout that puts the local packaging into the Fedora
+    repository: on the branch it was adopted from for an adopted package, on rawhide of the
+    empty repository that was just requested for a new one; 'branch' names another."""
+    dg = pkg.dist_git or {}
+    requested = not dg and (pkg.dir / reviewrequest.REPO_REQUEST).exists()
+    if not dg and not requested:
         util.action(
-            f"{pkg.crate}: dist-git {branch} moved since 'adopt' ({dg['commit'][:10]} -> {head[:10]}):\n"
-            + textwrap.indent(log or "(history rewritten)", "      ")
-            + f"\n   run 'adopt {pkg.crate}' again (it keeps the newer version here), redo the local "
-            "changes, then 'dist-git' again"
+            f"{pkg.crate}: not in Fedora and no repository was requested; 'adopt' an existing one"
+            f" or run 'request-repo {pkg.crate}' first"
         )
         return False
-    local_branch = f"update-{pkg.version}"
-    git(checkout, "checkout", "-q", "-B", local_branch, f"origin/{branch}")
+    adopted = dg.get("branch", "rawhide")
+    branch = branch or adopted
+    if dg.get("packaging") == "local":
+        util.action(
+            f"{pkg.crate}: marked with --mark-only, its packaging is for other targets; to propose "
+            f"it to Fedora, 'adopt {pkg.crate}' without --mark-only"
+        )
+        return False
+    name = pkg.rpm_name
+    checkout = ensure_checkout(top, pkg, dry_run)
+    if checkout is None:
+        return False
+    if dry_run:
+        util.info(
+            f"   would put the local packaging in {checkout}: on"
+            + (
+                " rawhide, which the request left empty"
+                if requested
+                else f" update-{pkg.version} from origin/{branch}"
+            )
+        )
+        return True
+    head = git(
+        checkout, "rev-parse", "-q", "--verify", f"origin/{branch}", check=False
+    ).stdout.strip()
+    local_branch = branch if requested else f"update-{pkg.version}"
+    if requested:
+        # the repository the request created is empty: rawhide is ours to write
+        if head:
+            util.action(
+                f"{pkg.crate}: {name} already has {branch}; run 'adopt {pkg.crate}' to take"
+                " its packaging over first"
+            )
+            return False
+        start = []
+    else:
+        if branch != adopted:
+            # the recorded commit is on another branch: nothing to compare with
+            util.warn(
+                f"{pkg.crate}: adopted from dist-git {adopted}, updating {branch} as asked; "
+                f"its packaging may differ from {adopted}'s"
+            )
+        elif dg.get("commit") and head != dg["commit"]:
+            log = git(
+                checkout, "log", "--oneline", f"{dg['commit']}..{head}", check=False
+            ).stdout.strip()
+            util.action(
+                f"{pkg.crate}: dist-git {branch} moved since 'adopt' ({dg['commit'][:10]} -> {head[:10]}):\n"
+                + textwrap.indent(log or "(history rewritten)", "      ")
+                + f"\n   run 'adopt {pkg.crate}' again (it keeps the newer version here), redo the local "
+                "changes, then 'dist-git' again"
+            )
+            return False
+        start = [f"origin/{branch}"]
+    git(checkout, "checkout", "-q", "-B", local_branch, *start)
     old_spec = git(checkout, "show", f"HEAD:{name}.spec", check=False).stdout
     old_config = git(checkout, "show", "HEAD:rust2rpm.toml", check=False).stdout
     repo, lookaside = update_files(pkg)
@@ -370,7 +403,8 @@ def prepare_update(
 
 
 def push_update(pkg: packages.LocalPackage) -> bool:
-    """Fork (once), upload the new sources to the lookaside cache, push the branch to the fork."""
+    """Fork (once), upload the sources to the lookaside cache, push the branch to the fork;
+    for a repository the request just created, push rawhide to origin."""
     f = pkg.dir / UPDATE_STATE
     if not f.exists():
         util.action(f"{pkg.crate}: nothing prepared; run 'dist-git {pkg.crate}' first")
@@ -382,6 +416,37 @@ def push_update(pkg: packages.LocalPackage) -> bool:
         return False
     state = json.loads(f.read_text())
     checkout = Path(state["checkout"])
+    if not state["base"]:
+        # the repository our request created: the first push is rawhide itself, no fork
+        if state["lookaside"]:
+            res = util.run(
+                ["fedpkg", "new-sources", *state["lookaside"]],
+                cwd=checkout,
+                capture_output=True,
+            )
+            if res.returncode:
+                util.action(
+                    f"{pkg.crate}: uploading to the lookaside cache failed (packagers only; Kerberos ticket?):\n"
+                    f"{res.stdout}{res.stderr}"
+                )
+                return False
+        if git(checkout, "status", "--porcelain", check=False).stdout.strip():
+            git(checkout, "commit", "-q", "--amend", "--no-edit", "-a")
+        git(checkout, "push", "-q", "origin", state["branch"])
+        head = git(checkout, "rev-parse", "HEAD").stdout.strip()
+        (pkg.dir / config.DIST_GIT_FILE).write_text(
+            "# In Fedora's dist-git: the repository came from our review request and this\n"
+            "# packaging is what is in it.  rust-deps updates it with 'dist-git'.\n"
+            f'package = "{pkg.rpm_name}"\nbranch = "{state["branch"]}"\ncommit = "{head}"\n'
+            f'version = "{pkg.version}"\n'
+        )
+        state.update(pushed=True)
+        f.write_text(json.dumps(state, indent=2) + "\n")
+        util.info(
+            f"   pushed {state['branch']} to origin: {DIST_GIT}/rpms/{pkg.rpm_name}"
+            "; 'review-status' follows the ticket once Koji builds it"
+        )
+        return True
     remotes = [r for r in git(checkout, "remote").stdout.split() if r != "origin"]
     if not remotes:
         res = util.run(["fedpkg", "fork"], cwd=checkout, capture_output=True)
@@ -469,21 +534,26 @@ def request_repo(pkg: packages.LocalPackage, dry_run: bool) -> bool:
             f" the local package is {nvr}; post the new URLs: copr --wait, then 'review-request --file'"
         )
         return False
-    if (pkg.dir / reviewrequest.REPO_REQUEST).exists():
-        util.info(
-            f"   already requested (ticket {json.loads((pkg.dir / reviewrequest.REPO_REQUEST).read_text())['bug']}),"
-            f" waiting for the scm-request to be closed: fedpkg clone {pkg.rpm_name}, import the SRPM and build"
-        )
-        return True
     try:
         reviewrequest._get(f"{DIST_GIT}/api/0/rpms/{pkg.rpm_name}")
+        if not dry_run:
+            # the approved review created the repository: 'dist-git' may fill it
+            (pkg.dir / reviewrequest.REPO_REQUEST).write_text(
+                json.dumps({"bug": bug["id"], "requested": time.strftime("%Y-%m-%d")}, indent=2) + "\n"
+            )
         util.info(
-            f"   the repository already exists: fedpkg clone {pkg.rpm_name}, import the SRPM and build"
+            f"   the repository exists: 'dist-git {pkg.crate}' clones it and puts the local packaging there"
         )
         return True
     except urllib.error.HTTPError as e:
         if e.code != 404:
             raise
+    if (pkg.dir / reviewrequest.REPO_REQUEST).exists():
+        util.info(
+            f"   already requested (ticket {json.loads((pkg.dir / reviewrequest.REPO_REQUEST).read_text())['bug']}):"
+            f" 'dist-git {pkg.crate}' clones and fills the repository once the scm-request ticket is closed"
+        )
+        return True
     cmd = ["fedpkg", "request-repo", pkg.rpm_name, str(bug["id"])]
     if dry_run:
         util.info("$ " + " ".join(cmd))
@@ -511,8 +581,8 @@ def request_repo(pkg: packages.LocalPackage, dry_run: bool) -> bool:
         json.dumps({"bug": bug["id"], "requested": time.strftime("%Y-%m-%d")}, indent=2) + "\n"
     )
     util.info(
-        f"   repository requested: once the scm-request ticket is closed, fedpkg clone {pkg.rpm_name},"
-        " import the SRPM and build"
+        f"   repository requested: once the scm-request ticket is closed, 'dist-git {pkg.crate}' clones"
+        " it and puts the local packaging there"
     )
     return True
 
@@ -534,8 +604,12 @@ def cmd_dist_git(args) -> None:
         util.die(f"say where the dist-git checkouts go: --dir DIR, or ${DIST_GIT_ENV}")
     pkgs = packages.select(args.root, args.crates, args.all)
     if args.all:
+        # adopted packages, and the empty repository a request created
         pkgs = [
-            p for p in pkgs if p.dist_git and p.dist_git.get("packaging") != "local"
+            p
+            for p in pkgs
+            if (p.dist_git and p.dist_git.get("packaging") != "local")
+            or (p.dir / reviewrequest.REPO_REQUEST).exists()
         ]
     pkgs = (
         [p for s in build.build_stages(pkgs, args.root, warn_outside=False) for p in s]
