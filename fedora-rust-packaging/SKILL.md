@@ -290,6 +290,8 @@ Read them as follows (forms can be combined with `--root <dir>`):
     closed, `$T dist-git <crate> --dir <dir>` clones the empty repository and
     commits the packaging on rawhide; show the commit, then `--push` with
     approval (it pushes to the repository itself, no fork or pull request).
+    Skip `request-repo` when the repository already exists: `dist-git` and
+    `review-plan` ask dist-git themselves and remember the answer.
     Build the packages of a chain in the stages `order` prints.
 9. **Consumer:** if the crates were needed by a project (like `authz-details-rs`
    needing jsonschema), re-check it with `$T resolve --manifest … --local-root <tree holding its sibling crates>`. Expect "all

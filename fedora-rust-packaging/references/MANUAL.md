@@ -596,6 +596,11 @@ pushes rawhide to the repository itself — a package you are importing needs no
 fork. The push records the package in `dist-git.toml` (in Fedora), so its
 updates follow the rules above.
 
+A request that was granted before that mark existed needs no re-running of
+`request-repo`: `dist-git`, `review-plan` and `review-status` ask dist-git once,
+and write the mark themselves when the repository is there. A package with no
+review filed here is never claimed by a dist-git repository of the same name.
+
 ## tmt tests
 
 `regen` also writes tmt tests next to the spec, for Fedora CI: once the files
