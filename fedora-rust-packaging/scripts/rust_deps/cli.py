@@ -465,8 +465,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "dist-git",
-        help="prepare the dist-git update of adopted packages: a local commit, "
-        "or with --push, in your fork (public)",
+        help="put the local packaging into the Fedora repository: the update commit of an "
+        "adopted package, or the import into one your review request created",
     )
     with_sel(sp)
     sp.add_argument(
@@ -482,8 +482,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--push",
         action="store_true",
-        help="fork the repository (once), upload the sources to the lookaside cache, and push the "
-        "prepared branch to the fork; prints the link to open the pull request",
+        help="upload the sources to the lookaside cache and push: for an adopted package, fork the "
+        "repository (once) and push the branch to it, printing the link to open the pull request; "
+        "for a repository your request created, push rawhide to the repository itself",
     )
     sp.add_argument("-n", "--dry-run", action="store_true")
     sp.set_defaults(func=distgit.cmd_dist_git)

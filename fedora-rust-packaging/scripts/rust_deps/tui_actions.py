@@ -204,9 +204,11 @@ _ACTIONS = [
     ),
     TuiAction(
         "dist-git",
-        "Prepare dist-git update",
+        "Put packaging in dist-git",
         "dist-git",
-        "Commit the update on a local branch of the dist-git checkout.",
+        "For an adopted package: commit the update on a branch of its dist-git "
+        "checkout. For a repository your review request created: clone it and "
+        "commit the packaging on rawhide.",
         inputs=("dir", "dry_run"),
     ),
     TuiAction(
@@ -268,6 +270,7 @@ STAGE_ACTIONS = {
     ],
     "draft": ["file-request", "review-request", "review-plan", "copr-status"],
     "filed": ["review-status", "request-repo", "copr", "copr-status", "update"],
+    "requested": ["dist-git", "request-repo", "review-status", "copr", "copr-status", "update"],
     "adopted": ["dist-git", "adopt", "copr", "copr-status", "status", "update"],
     "targets": ["copr", "copr-status", "check-targets", "tmt", "status", "update"],
 }
