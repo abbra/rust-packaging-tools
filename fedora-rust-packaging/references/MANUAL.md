@@ -510,12 +510,16 @@ After approval (`fedora-review+`, ticket assigned to the reviewer):
 ```
 rust-deps request-repo <crate>                # runs 'fedpkg request-repo <rpm> <bug>'
 # (needs a Forgejo token: fedpkg set-forgejo-token)
-fedpkg clone rust-<crate> && cd rust-<crate> # once the fedora-scm-requests ticket is closed
-fedpkg import <path to the SRPM>
-cp -a <package dir>/.fmf <package dir>/plans <package dir>/tests . && git add .fmf plans tests
-git commit && git push
-fedpkg build
+rust-deps dist-git <crate>                    # once the fedora-scm-requests ticket is closed:
+                                              # clones the empty repository and commits the
+                                              # packaging (spec, rust2rpm.toml, tmt files) on rawhide
+rust-deps dist-git --push <crate>             # uploads the sources, pushes rawhide to the
+                                              # repository itself (a new repository needs no fork,
+                                              # no pull request)
 ```
+
+`dist-git` records the package as in Fedora (`dist-git.toml`) when that push
+lands, so `review-status` and `review-plan` follow the ticket from then on.
 
 Build the packages of a chain in the stages that `order` prints; before
 building a stage, wait until the previous stage is in the buildroot
@@ -583,6 +587,14 @@ rust-deps dist-git --push zmij           # fork, upload sources, push; prints th
   the tmt tests. `review-plan` shows the update as prepared, then as pushed
   with the URL.
 - `--push` is public: it acts under the user's account.
+
+A package whose repository `request-repo` created (marked in `repo-request.json`)
+has nothing to adopt and no pull request to open: the same `dist-git` clones the
+empty repository, commits the spec, `rust2rpm.toml`, patches and tmt files on
+rawhide (`New package: <rpm> <version>`), and `--push` uploads the sources and
+pushes rawhide to the repository itself — a package you are importing needs no
+fork. The push records the package in `dist-git.toml` (in Fedora), so its
+updates follow the rules above.
 
 ## tmt tests
 
