@@ -1315,6 +1315,60 @@ def test_request_repo_rechecks_the_flag_before_submitting(tmp_path, monkeypatch,
     assert calls == []
     assert "no longer approved" in actions[0]
 
+
+def test_a_request_filed_before_marks_existed_is_recognised(tmp_path, monkeypatch):
+    """'request-repo' succeeded before the marker file existed: dist-git says the
+    repository is there, and that answer is written down, so it is asked once."""
+    d = make_package(tmp_path, "zmij", "rust-zmij", "1.0.23")
+    (d / rd.reviewrequest.REQUEST_STATE).write_text('{"bug": 2401234}\n')
+    pkg = rd.packages.local_packages(tmp_path)["zmij"]
+    seen = []
+    def get(url):
+        seen.append(url)
+        return b"{}"
+    monkeypatch.setattr(rd.reviewrequest, "_get", get)
+    assert rd.reviewrequest.repo_requested(pkg) is True
+    assert seen == ["https://src.fedoraproject.org/api/0/rpms/rust-zmij"]
+    mark = json.loads((d / rd.reviewrequest.REPO_REQUEST).read_text())
+    assert mark["bug"] == 2401234 and mark["requested"]  # the filed ticket, as request-repo writes it
+    assert rd.reviewrequest.repo_requested(pkg) is True
+    assert len(seen) == 1  # the answer is remembered
+    # the tools see the package as one whose repository is being filled, once its
+    # build line is done (the stages put spec/tests/SRPM first)
+    (d / "rust2rpm.toml").write_text("[tests]\n")
+    (d / "rust-zmij-1.0.23-1.fc45.src.rpm").write_text("")
+    assert rd.tui_overview.tui_stage(pkg).name == "requested"
+    monkeypatch.setattr(rd.reviewplan, "dist_git_has", lambda name: True)
+    monkeypatch.setattr(rd.build, "build_stages", lambda pkgs, root, warn_outside=True: [[pkg]])
+    monkeypatch.setattr(rd.build, "local_deps", lambda pkgs, root: {pkg.crate: set()})
+    plan = rd.reviewplan.review_plan([pkg], tmp_path, None, "fedora-rawhide-x86_64")
+    item = [i for s in plan for i in s][0]
+    assert (item.kind, item.pkg.crate) == ("update", "zmij")
+    assert "the repository requested for rust-zmij is there" in item.detail
+
+
+def test_an_unrequested_package_is_not_claimed_by_a_namesake(tmp_path, monkeypatch):
+    """Without a review filed here, a dist-git repository of the same name is not ours;
+    a repository that is not there yet is no answer either."""
+    d = make_package(tmp_path, "zmij", "rust-zmij", "1.0.23")
+    pkg = rd.packages.local_packages(tmp_path)["zmij"]
+    called = []
+    monkeypatch.setattr(rd.reviewrequest, "_get", lambda url: called.append(url) or b"{}")
+    assert rd.reviewrequest.repo_requested(pkg) is False
+    assert called == []  # no review filed: not even asked
+    (d / rd.reviewrequest.REQUEST_STATE).write_text('{"bug": 2401234}\n')
+    def missing(url):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    monkeypatch.setattr(rd.reviewrequest, "_get", missing)
+    assert rd.reviewrequest.repo_requested(pkg) is False
+    assert not (d / rd.reviewrequest.REPO_REQUEST).exists()  # pending: asked again next time
+    def forbidden(url):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+    monkeypatch.setattr(rd.reviewrequest, "_get", forbidden)
+    with pytest.raises(urllib.error.HTTPError):  # a failed lookup proves nothing
+        rd.reviewrequest.repo_requested(pkg)
+
+
 def test_a_requested_repository_is_imported_into_dist_git(tmp_path, monkeypatch, capsys):
     """After the request is granted, 'dist-git' clones the empty repository and commits
     the local packaging on rawhide; 'dist-git --push' pushes rawhide to origin itself,
