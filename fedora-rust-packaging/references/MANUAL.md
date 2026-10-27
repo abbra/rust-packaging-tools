@@ -508,7 +508,8 @@ fedora-review found. Treat them like the ones from `review`.
 After approval (`fedora-review+`, ticket assigned to the reviewer):
 
 ```
-fedpkg request-repo rust-<crate> <bug>       # needs a forge token in ~/.config/rpkg/fedpkg.conf
+rust-deps request-repo <crate>                # runs 'fedpkg request-repo <rpm> <bug>'
+# (needs a Forgejo token: fedpkg set-forgejo-token)
 fedpkg clone rust-<crate> && cd rust-<crate> # once the fedora-scm-requests ticket is closed
 fedpkg import <path to the SRPM>
 cp -a <package dir>/.fmf <package dir>/plans <package dir>/tests . && git add .fmf plans tests

@@ -53,6 +53,7 @@ TUI_PLAYBOOKS = {
     "review-request": TuiPlaybook(result="review-request"),
     "review-plan": TuiPlaybook(result="review-plan"),
     "review-status": TuiPlaybook(),
+    "request-repo": TuiPlaybook(requires=("fedpkg",)),
     "adopt": TuiPlaybook(),
     "dist-git": TuiPlaybook(requires=("fedpkg",)),
 }

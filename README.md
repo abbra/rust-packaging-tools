@@ -202,6 +202,7 @@ rust-deps review --all -r fedora-45-x86_64      # fedora-review, before submitti
 rust-deps review-plan --all --project username/repo   # what to submit, in which order, which drafts are ready
 rust-deps review-request --all --project username/repo --fas username   # drafts; --file files them
 rust-deps review-status --all                   # reviewer comments, next steps
+rust-deps request-repo --all                     # after approval: ask for the dist-git repo
 ```
 
 | Option | Meaning |
