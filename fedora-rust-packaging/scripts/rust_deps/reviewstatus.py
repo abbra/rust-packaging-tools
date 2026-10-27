@@ -100,7 +100,7 @@ def review_status_one(
             )
     return (
         review_ticket_report(
-            bug, rpm_name, show, pkg.dir / f"review-bug-{bug['id']}.txt", pkg
+            bug, rpm_name, show, pkg.dir / f"review-bug-{bug['id']}.txt", pkg.crate, pkg
         ),
         bug["id"],
     )
@@ -111,6 +111,7 @@ def review_ticket_report(
     rpm_name: str,
     show: int,
     log: Path,
+    crate: str | None = None,
     pkg: packages.LocalPackage | None = None,
     prev: dict | None = None,
     record: dict | None = None,
@@ -283,8 +284,13 @@ def review_ticket_report(
                 "files (.fmf plans tests) and build"
             )
         except urllib.error.HTTPError:
+            if pkg and (pkg.dir / reviewrequest.REPO_REQUEST).exists():
+                return (
+                    "the repository request is pending: wait for the scm-request ticket to be closed,"
+                    f" then fedpkg clone {rpm_name}, import the SRPM and build"
+                )
             return (
-                f"approved: request the dist-git repository: 'request-repo {rpm_name}'"
+                f"approved: request the dist-git repository: 'request-repo {crate or rpm_name}'"
                 " (needs a Forgejo token: 'fedpkg set-forgejo-token')"
             )
     if "NotReady" in (bug.get("whiteboard") or ""):

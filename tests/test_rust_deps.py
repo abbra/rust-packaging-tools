@@ -1210,13 +1210,20 @@ def test_prepare_update_uses_the_adopted_branch(tmp_path, monkeypatch):
     assert sh("git", "rev-parse", "HEAD", cwd=top / "rust-zmij") == adopted
 
 
-def stub_bug_and_repo(monkeypatch, flag: str, repo_exists: bool):
-    """The Bugzilla ticket and whether dist-git already has the repository."""
-    monkeypatch.setattr(rd.reviewstatus, "bz_rest",
-                        lambda path: {"bugs": [{"id": 2401234, "status": "NEW",
-                                               "resolution": None,
-                                               "flags": [{"name": "fedora-review",
-                                                          "status": flag}]}]})
+def stub_bug_and_repo(monkeypatch, flag: str, repo_exists: bool, *, status="NEW",
+                      resolution=None, summary="Review Request: rust-zmij - pace",
+                      nvr="1.0.23-1"):
+    """The Bugzilla ticket, the SRPM it posted, and whether dist-git has the repository."""
+    def rest(path):
+        if path.endswith("/comment"):
+            return {"bugs": {"2401234": {"comments": [
+                {"creator": "me@example.com",
+                 "text": "SRPM URL: https://copr/rust-zmij-1.0.23-1.fc43.src.rpm"}]}}}
+        return {"bugs": [{"id": 2401234, "status": status, "resolution": resolution,
+                          "summary": summary, "creator": "me@example.com",
+                          "flags": [{"name": "fedora-review", "status": flag}]}]}
+    monkeypatch.setattr(rd.reviewstatus, "bz_rest", rest)
+    monkeypatch.setattr(rd.reviewrequest, "spec_query", lambda spec, fmt: nvr)
     def get(url):
         if repo_exists:
             return b"{}"
@@ -1224,28 +1231,89 @@ def stub_bug_and_repo(monkeypatch, flag: str, repo_exists: bool):
     monkeypatch.setattr(rd.reviewrequest, "_get", get)
 
 
-def test_request_repo_runs_fedpkg_with_the_bug(tmp_path, monkeypatch, capsys):
+def approved_pkg(tmp_path, monkeypatch):
     d = make_package(tmp_path, "zmij", "rust-zmij", "1.0.23")
     (d / rd.reviewrequest.REQUEST_STATE).write_text('{"bug": 2401234}\n')
-    pkg = rd.packages.local_packages(tmp_path)["zmij"]
-    stub_bug_and_repo(monkeypatch, "?", False)
     actions = []
     monkeypatch.setattr(rd.util, "action", actions.append)
-    # only an approved ticket may be submitted
+    calls = []
+    monkeypatch.setattr(rd.util, "run",
+                        lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    return rd.packages.local_packages(tmp_path)["zmij"], actions, calls
+
+
+def test_request_repo_requires_an_approved_review(tmp_path, monkeypatch, capsys):
+    pkg, actions, calls = approved_pkg(tmp_path, monkeypatch)
+    # only an approved open ticket may be submitted
+    stub_bug_and_repo(monkeypatch, "?", False)
     assert rd.distgit.request_repo(pkg, False) is False
     assert "not approved" in actions[0]
+    # a closed ticket with fedora-review+ is finished or rejected, never a new request
+    actions.clear()
+    stub_bug_and_repo(monkeypatch, "+", False, status="CLOSED", resolution="NOTABUG")
+    assert rd.distgit.request_repo(pkg, False) is False
+    assert "CLOSED NOTABUG" in actions[0]
+    # the saved ticket may belong to another package
+    actions.clear()
+    stub_bug_and_repo(monkeypatch, "+", False, summary="Review Request: rust-other - pace")
+    assert rd.distgit.request_repo(pkg, False) is False
+    assert "rust-other" in actions[0]
+    # the local package is no longer the reviewed one
+    actions.clear()
+    stub_bug_and_repo(monkeypatch, "+", False, nvr="1.0.24-1")
+    assert rd.distgit.request_repo(pkg, False) is False
+    assert "approved SRPM" in actions[0]
+    assert calls == []
+
+
+def test_request_repo_runs_fedpkg_once(tmp_path, monkeypatch, capsys):
+    pkg, actions, calls = approved_pkg(tmp_path, monkeypatch)
     stub_bug_and_repo(monkeypatch, "+", False)
+    # a dry run only prints the command
     assert rd.distgit.request_repo(pkg, True) is True
     assert "$ fedpkg request-repo rust-zmij 2401234" in capsys.readouterr().out
-    run = []
-    monkeypatch.setattr(rd.util, "run",
-                        lambda cmd, **kw: run.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    assert calls == []
     assert rd.distgit.request_repo(pkg, False) is True
-    assert run == [["fedpkg", "request-repo", "rust-zmij", "2401234"]]
-    # an existing repository: nothing to request
+    assert calls == [["fedpkg", "request-repo", "rust-zmij", "2401234"]]
+    assert json.loads((pkg.dir / rd.reviewrequest.REPO_REQUEST).read_text())["bug"] == 2401234
+    # a retry while the request is pending does not ask twice
+    calls.clear()
+    assert rd.distgit.request_repo(pkg, False) is True
+    assert calls == []
+    assert "already requested" in capsys.readouterr().out
+
+
+def test_request_repo_never_reruns_fedpkg_without_a_need(tmp_path, monkeypatch, capsys):
+    pkg, actions, calls = approved_pkg(tmp_path, monkeypatch)
+    # an existing repository: nothing to request, fedpkg must not run
     stub_bug_and_repo(monkeypatch, "+", True)
     assert rd.distgit.request_repo(pkg, False) is True
+    assert calls == []
     assert "already exists" in capsys.readouterr().out
+    # a failed lookup (not 404) is an error, not proof that the repository is missing
+    def get(url):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+    monkeypatch.setattr(rd.reviewrequest, "_get", get)
+    with pytest.raises(urllib.error.HTTPError):
+        rd.distgit.request_repo(pkg, False)
+    assert calls == []
+
+
+def test_request_repo_rechecks_the_flag_before_submitting(tmp_path, monkeypatch, capsys):
+    pkg, actions, calls = approved_pkg(tmp_path, monkeypatch)
+    stub_bug_and_repo(monkeypatch, "+", False)
+    rest = rd.reviewstatus.bz_rest
+    def revoked(path):
+        if "include_fields=flags" in path:  # the approval was revoked meanwhile
+            return {"bugs": [{"id": 2401234, "status": "NEW", "resolution": None,
+                              "summary": "Review Request: rust-zmij - pace",
+                              "creator": "me@example.com",
+                              "flags": [{"name": "fedora-review", "status": "-"}]}]}
+        return rest(path)
+    monkeypatch.setattr(rd.reviewstatus, "bz_rest", revoked)
+    assert rd.distgit.request_repo(pkg, False) is False
+    assert calls == []
+    assert "no longer approved" in actions[0]
 
 
 # ─── CLI wiring ──────────────────────────────────────────────────────────────
@@ -1769,7 +1837,7 @@ def test_tui_suggested_actions_maps_a_single_positional_crate(tmp_path):
 def test_tui_suggested_actions_offers_request_repo_after_approval(tmp_path):
     make_package(tmp_path, "zmij", "rust-zmij", "1.0.23")
     commands = _tui_commands()
-    lines = ["   next: approved: request the dist-git repository: 'request-repo rust-zmij'"
+    lines = ["   next: approved: request the dist-git repository: 'request-repo zmij'"
              " (needs a Forgejo token: 'fedpkg set-forgejo-token')"]
     assert rd.tui_overview.tui_suggested_actions(lines, tmp_path, commands) == \
         [("request-repo", ["zmij"], [], {}, lines[0].strip())]

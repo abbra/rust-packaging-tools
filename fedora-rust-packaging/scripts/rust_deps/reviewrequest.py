@@ -25,6 +25,7 @@ FE_NEEDSPONSOR = (
     177841  # tracker bug: review requests from contributors who need a sponsor
 )
 REQUEST_STATE = "review-request.json"  # {"bug": N, "spec_url": ..., "srpm_url": ...}
+REPO_REQUEST = "repo-request.json"  # {"bug": N, "requested": "..."} after 'fedpkg request-repo'
 REQUEST_DRAFT = "review-request.txt"
 
 
