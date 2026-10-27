@@ -489,6 +489,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=distgit.cmd_dist_git)
 
     sp = sub.add_parser(
+        "request-repo",
+        help="request the dist-git repository of an approved package (after review-status)",
+    )
+    with_sel(sp)
+    sp.add_argument("-n", "--dry-run", action="store_true")
+    sp.set_defaults(func=distgit.cmd_request_repo)
+
+    sp = sub.add_parser(
         "review-plan",
         help="what to submit for review, in which order, and which drafts are "
         "ready (read-only)",

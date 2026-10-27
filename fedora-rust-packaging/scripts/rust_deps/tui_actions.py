@@ -189,6 +189,14 @@ _ACTIONS = [
         "Where each review ticket stands, new comments, and the next step.",
     ),
     TuiAction(
+        "request-repo",
+        "Request the dist-git repository",
+        "request-repo",
+        "Ask Fedora for the repository of an approved package, referencing its "
+        "review ticket; needs a Forgejo token ('fedpkg set-forgejo-token').",
+        inputs=("dry_run",),
+    ),
+    TuiAction(
         "adopt",
         "Adopt Fedora's packaging",
         "adopt",
@@ -259,7 +267,7 @@ STAGE_ACTIONS = {
         "regen",
     ],
     "draft": ["file-request", "review-request", "review-plan", "copr-status"],
-    "filed": ["review-status", "copr", "copr-status", "update"],
+    "filed": ["review-status", "request-repo", "copr", "copr-status", "update"],
     "adopted": ["dist-git", "adopt", "copr", "copr-status", "status", "update"],
     "targets": ["copr", "copr-status", "check-targets", "tmt", "status", "update"],
 }

@@ -283,7 +283,10 @@ def review_ticket_report(
                 "files (.fmf plans tests) and build"
             )
         except urllib.error.HTTPError:
-            return f"approved: fedpkg request-repo {rpm_name} {bug['id']}"
+            return (
+                f"approved: request the dist-git repository: 'request-repo {rpm_name}'"
+                " (needs a Forgejo token: 'fedpkg set-forgejo-token')"
+            )
     if "NotReady" in (bug.get("whiteboard") or ""):
         return (
             "marked NotReady: address the issues, post new URLs, clear the whiteboard"

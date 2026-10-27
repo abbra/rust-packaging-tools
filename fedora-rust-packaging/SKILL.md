@@ -285,8 +285,9 @@ Read them as follows (forms can be combined with `--root <dir>`):
    - After a reviewer's comments: fix, `regen`, `srpm`, `review`, `copr
      --wait`, then `review-request --file --comment "<what changed>"`.
      Replying in Bugzilla in other ways is up to the user.
-   - After approval (`fedora-review+`), give the user the `fedpkg
-     request-repo`/`import`/`build` steps from the manual, in `order` stages.
+   - After approval (`fedora-review+`), run `$T request-repo <crate>` (or offer
+     it) to ask Fedora for the dist-git repository; then give the user the
+     `clone`/`import`/`build` steps from the manual, in `order` stages.
 9. **Consumer:** if the crates were needed by a project (like `authz-details-rs`
    needing jsonschema), re-check it with `$T resolve --manifest … --local-root <tree holding its sibling crates>`. Expect "all
    available" or only the new local packages. Patch its spec requirement if you

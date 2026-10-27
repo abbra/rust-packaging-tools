@@ -1210,6 +1210,44 @@ def test_prepare_update_uses_the_adopted_branch(tmp_path, monkeypatch):
     assert sh("git", "rev-parse", "HEAD", cwd=top / "rust-zmij") == adopted
 
 
+def stub_bug_and_repo(monkeypatch, flag: str, repo_exists: bool):
+    """The Bugzilla ticket and whether dist-git already has the repository."""
+    monkeypatch.setattr(rd.reviewstatus, "bz_rest",
+                        lambda path: {"bugs": [{"id": 2401234, "status": "NEW",
+                                               "resolution": None,
+                                               "flags": [{"name": "fedora-review",
+                                                          "status": flag}]}]})
+    def get(url):
+        if repo_exists:
+            return b"{}"
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    monkeypatch.setattr(rd.reviewrequest, "_get", get)
+
+
+def test_request_repo_runs_fedpkg_with_the_bug(tmp_path, monkeypatch, capsys):
+    d = make_package(tmp_path, "zmij", "rust-zmij", "1.0.23")
+    (d / rd.reviewrequest.REQUEST_STATE).write_text('{"bug": 2401234}\n')
+    pkg = rd.packages.local_packages(tmp_path)["zmij"]
+    stub_bug_and_repo(monkeypatch, "?", False)
+    actions = []
+    monkeypatch.setattr(rd.util, "action", actions.append)
+    # only an approved ticket may be submitted
+    assert rd.distgit.request_repo(pkg, False) is False
+    assert "not approved" in actions[0]
+    stub_bug_and_repo(monkeypatch, "+", False)
+    assert rd.distgit.request_repo(pkg, True) is True
+    assert "$ fedpkg request-repo rust-zmij 2401234" in capsys.readouterr().out
+    run = []
+    monkeypatch.setattr(rd.util, "run",
+                        lambda cmd, **kw: run.append(cmd) or subprocess.CompletedProcess(cmd, 0))
+    assert rd.distgit.request_repo(pkg, False) is True
+    assert run == [["fedpkg", "request-repo", "rust-zmij", "2401234"]]
+    # an existing repository: nothing to request
+    stub_bug_and_repo(monkeypatch, "+", True)
+    assert rd.distgit.request_repo(pkg, False) is True
+    assert "already exists" in capsys.readouterr().out
+
+
 # ─── CLI wiring ──────────────────────────────────────────────────────────────
 
 def run_cli(monkeypatch, *argv):
@@ -1726,6 +1764,15 @@ def test_tui_suggested_actions_maps_a_single_positional_crate(tmp_path):
     # 'copr-log' takes one crate as a positional: it arrives as a form value, not a picker
     assert log[1] == []
     assert log[3] == {"chroot": "fedora-44-x86_64", "project": "u/p", "crate": "synta"}
+
+
+def test_tui_suggested_actions_offers_request_repo_after_approval(tmp_path):
+    make_package(tmp_path, "zmij", "rust-zmij", "1.0.23")
+    commands = _tui_commands()
+    lines = ["   next: approved: request the dist-git repository: 'request-repo rust-zmij'"
+             " (needs a Forgejo token: 'fedpkg set-forgejo-token')"]
+    assert rd.tui_overview.tui_suggested_actions(lines, tmp_path, commands) == \
+        [("request-repo", ["zmij"], [], {}, lines[0].strip())]
 
 
 def test_tui_playbooks_cover_every_command():

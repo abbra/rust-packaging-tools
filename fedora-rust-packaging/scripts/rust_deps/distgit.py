@@ -23,6 +23,7 @@ from . import regen
 from . import reviewplan
 from . import reviewrequest
 from . import util
+from . import reviewstatus
 from . import versions
 
 DIST_GIT = "https://src.fedoraproject.org"
@@ -418,6 +419,67 @@ def push_update(pkg: packages.LocalPackage) -> bool:
         f"   pushed {state['branch']} to {fork}; open the pull request: {url or '(see the fork on ' + DIST_GIT + ')'}"
     )
     return True
+
+
+def request_repo(pkg: packages.LocalPackage, dry_run: bool) -> bool:
+    """Ask Fedora for the dist-git repository of a package whose review was approved."""
+    bug = reviewrequest.request_state(pkg).get("bug")
+    if not bug:
+        found = reviewstatus.find_review_bug(pkg.rpm_name)
+        if not found:
+            util.action(
+                f"{pkg.crate}: no review ticket to reference; file one with 'review-request --file'"
+            )
+            return False
+        bug = found["id"]
+    bug = reviewstatus.bz_rest(
+        f"bug/{bug}?include_fields=id,status,resolution,flags"
+    )["bugs"][0]
+    flag, _ = reviewstatus.review_flag(bug)
+    if flag != "+":
+        util.action(
+            f"{pkg.crate}: ticket {bug['id']} is not approved"
+            f" (fedora-review{flag or ' not set'}); wait for the review"
+        )
+        return False
+    try:
+        reviewrequest._get(f"{DIST_GIT}/api/0/rpms/{pkg.rpm_name}")
+        util.info(
+            f"   the repository already exists: fedpkg clone {pkg.rpm_name}, import the SRPM and build"
+        )
+        return True
+    except urllib.error.HTTPError:
+        pass
+    cmd = ["fedpkg", "request-repo", pkg.rpm_name, str(bug["id"])]
+    if dry_run:
+        util.info("$ " + " ".join(cmd))
+        return True
+    res = util.run(cmd, capture_output=True)
+    out = (res.stdout or "") + (res.stderr or "")
+    if out.strip():
+        util.info(out.rstrip())
+    if res.returncode:
+        util.action(
+            f"{pkg.crate}: fedpkg request-repo failed (it needs a Forgejo token:"
+            " 'fedpkg set-forgejo-token')"
+        )
+        return False
+    util.info(
+        f"   repository requested: once the scm-request ticket is closed, fedpkg clone {pkg.rpm_name},"
+        " import the SRPM and build"
+    )
+    return True
+
+
+def cmd_request_repo(args) -> None:
+    if not shutil.which("fedpkg"):
+        util.die("fedpkg is needed to request the repository: dnf install fedpkg")
+    pkgs = packages.select(args.root, args.crates, args.all)
+    if args.all:
+        pkgs = [p for p in pkgs if (p.dir / reviewrequest.REQUEST_STATE).exists()]
+    failed = [p.crate for p in pkgs if not request_repo(p, args.dry_run)]
+    if failed:
+        util.die(f"no repository requested for: {', '.join(failed)}")
 
 
 def cmd_dist_git(args) -> None:
