@@ -433,7 +433,7 @@ def request_repo(pkg: packages.LocalPackage, dry_run: bool) -> bool:
             return False
         bug = found["id"]
     bug = reviewstatus.bz_rest(
-        f"bug/{bug}?include_fields=id,status,resolution,flags"
+        f"bug/{bug}?include_fields=id,summary,status,resolution,flags"
     )["bugs"][0]
     flag, _ = reviewstatus.review_flag(bug)
     if flag != "+":
@@ -442,18 +442,61 @@ def request_repo(pkg: packages.LocalPackage, dry_run: bool) -> bool:
             f" (fedora-review{flag or ' not set'}); wait for the review"
         )
         return False
+    # a CLOSED ticket with fedora-review+ is done, rejected, or a duplicate: never a new request
+    if bug["status"] not in ("NEW", "ASSIGNED", "MODIFIED", "RELEASE_PENDING"):
+        util.action(
+            f"{pkg.crate}: ticket {bug['id']} is {bug['status']}"
+            f" {bug['resolution'] or ''}; read it before requesting a repository"
+        )
+        return False
+    # the saved state may name a ticket for another package
+    if not bug["summary"].startswith(f"Review Request: {pkg.rpm_name} -"):
+        util.action(
+            f"{pkg.crate}: ticket {bug['id']} reviews '{bug['summary']}', not {pkg.rpm_name}"
+        )
+        return False
+    nvr = f"{pkg.rpm_name}-{reviewrequest.spec_query(pkg.spec, '%{version}-%{release}')}"
+    comments = reviewstatus.bz_rest(f"bug/{bug['id']}/comment")["bugs"][str(bug["id"])][
+        "comments"
+    ]
+    posted = re.findall(
+        r"SRPM URL:\s*(\S+)",
+        "\n".join(c["text"] for c in comments if c["creator"] == bug["creator"]),
+    )
+    if posted and nvr not in posted[-1]:
+        util.action(
+            f"{pkg.crate}: the approved SRPM is {posted[-1].rsplit('/', 1)[-1]},"
+            f" the local package is {nvr}; post the new URLs: copr --wait, then 'review-request --file'"
+        )
+        return False
+    if (pkg.dir / reviewrequest.REPO_REQUEST).exists():
+        util.info(
+            f"   already requested (ticket {json.loads((pkg.dir / reviewrequest.REPO_REQUEST).read_text())['bug']}),"
+            f" waiting for the scm-request to be closed: fedpkg clone {pkg.rpm_name}, import the SRPM and build"
+        )
+        return True
     try:
         reviewrequest._get(f"{DIST_GIT}/api/0/rpms/{pkg.rpm_name}")
         util.info(
             f"   the repository already exists: fedpkg clone {pkg.rpm_name}, import the SRPM and build"
         )
         return True
-    except urllib.error.HTTPError:
-        pass
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
     cmd = ["fedpkg", "request-repo", pkg.rpm_name, str(bug["id"])]
     if dry_run:
         util.info("$ " + " ".join(cmd))
         return True
+    # the approval may have been revoked since it was fetched
+    flag, _ = reviewstatus.review_flag(
+        reviewstatus.bz_rest(f"bug/{bug['id']}?include_fields=flags")["bugs"][0]
+    )
+    if flag != "+":
+        util.action(
+            f"{pkg.crate}: fedora-review on ticket {bug['id']} is no longer approved; not requesting"
+        )
+        return False
     res = util.run(cmd, capture_output=True)
     out = (res.stdout or "") + (res.stderr or "")
     if out.strip():
@@ -464,6 +507,9 @@ def request_repo(pkg: packages.LocalPackage, dry_run: bool) -> bool:
             " 'fedpkg set-forgejo-token')"
         )
         return False
+    (pkg.dir / reviewrequest.REPO_REQUEST).write_text(
+        json.dumps({"bug": bug["id"], "requested": time.strftime("%Y-%m-%d")}, indent=2) + "\n"
+    )
     util.info(
         f"   repository requested: once the scm-request ticket is closed, fedpkg clone {pkg.rpm_name},"
         " import the SRPM and build"
@@ -475,8 +521,6 @@ def cmd_request_repo(args) -> None:
     if not shutil.which("fedpkg"):
         util.die("fedpkg is needed to request the repository: dnf install fedpkg")
     pkgs = packages.select(args.root, args.crates, args.all)
-    if args.all:
-        pkgs = [p for p in pkgs if (p.dir / reviewrequest.REQUEST_STATE).exists()]
     failed = [p.crate for p in pkgs if not request_repo(p, args.dry_run)]
     if failed:
         util.die(f"no repository requested for: {', '.join(failed)}")
