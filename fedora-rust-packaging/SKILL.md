@@ -313,7 +313,10 @@ A chain of adopted packages (a consumer and its providers) moves together: with
 `dist-git --push` and the pull requests merged, `$T sidetag <chain> --wait`
 builds the whole chain in one Koji side-tag, stage by stage, and prints the
 `bodhi updates new --from-tag` command that files it as one update ("Side-tag
-builds" in the manual).
+builds" in the manual). `$T packit --all --fas <you> -n` writes each member a
+`.packit.yaml` so later releases of the chain do that by themselves
+("Releasing a chain with Packit"); check in one canary repository first that
+your own config does not replace Fedora CI's default pull-request checks.
 
 ## Packaging inside the upstream repository
 

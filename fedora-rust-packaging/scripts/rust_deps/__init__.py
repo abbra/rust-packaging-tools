@@ -34,6 +34,7 @@ from . import (
     doctor,
     edits,
     fedora,
+    packit,
     packages,
     pkginit,
     regen,
