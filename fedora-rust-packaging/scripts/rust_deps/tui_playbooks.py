@@ -56,4 +56,5 @@ TUI_PLAYBOOKS = {
     "request-repo": TuiPlaybook(requires=("fedpkg",)),
     "adopt": TuiPlaybook(),
     "dist-git": TuiPlaybook(requires=("fedpkg",)),
+    "sidetag": TuiPlaybook(requires=("koji",)),
 }

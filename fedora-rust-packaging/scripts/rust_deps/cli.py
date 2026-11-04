@@ -25,6 +25,7 @@ from . import review
 from . import reviewplan
 from . import reviewrequest
 from . import reviewstatus
+from . import sidetag
 from . import srpm
 from . import status
 from . import targets
@@ -288,6 +289,36 @@ def build_parser() -> argparse.ArgumentParser:
         "and packages with no build of their current version",
     )
     sp.set_defaults(func=build.cmd_copr)
+
+    sp = sub.add_parser(
+        "sidetag",
+        help="build the packages of a chain in one Koji side-tag, stage by stage "
+        "(from their pushed dist-git updates)",
+    )
+    with_sel(sp)
+    sp.add_argument(
+        "--target",
+        default="rawhide",
+        help="build target whose build tag the side-tag is made from (default %(default)s)",
+    )
+    sp.add_argument(
+        "--new",
+        action="store_true",
+        help="create a new side-tag instead of reusing one of yours for that base tag",
+    )
+    sp.add_argument(
+        "--wait",
+        action="store_true",
+        help="wait for each stage's builds and for the side-tag repository before the next",
+    )
+    sp.add_argument(
+        "--bugs",
+        metavar="N,N",
+        help="extra Bugzilla tickets for the update to close (the packages' open review "
+        "tickets and '… is available' bugs are found on their own)",
+    )
+    sp.add_argument("-n", "--dry-run", action="store_true")
+    sp.set_defaults(func=sidetag.cmd_sidetag)
 
     sp = sub.add_parser(
         "copr-log",

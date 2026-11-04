@@ -185,6 +185,7 @@ graph at `regen`.
 | `check-targets CRATE…\|--all (-r CHROOT…\|--project P) [-q] [--refresh]` | Read-only; no COPR build needed. For each package and target release (the `-r` chroots, or all chroots of the COPR project; `targets.toml` respected), generate the BuildRequires as rust2rpm does (`cargo2rpm buildrequires` with the spec's feature flags, dev-dependencies unless `%check` is off) and check each: a local package built for that target, with the version and the features asked for, or the target's repositories. Also checks that each feature subpackage could be installed: every `dep/feature` a feature refers to must exist in the target, or in the local package (a feature dropped from a local dependency must be dropped from its dependents too). Notes where a local package shadows other versions the target ships. Fails if anything would not resolve. See "COPR build failures". |
 | `copr-status CRATE…\|--all --project P [-r CHROOT]… [--json] [--refresh] [--wait [--interval S]]` | Read-only. For the latest COPR build of each package's current version, show every chroot's result, and for each failure the reason from the build log: each missing BuildRequires, checked against the local packages and their builds and against the target's repositories, or the compile and test errors. Ends with the next steps. Logs are cached in `~/.cache/rust-packaging-tools/copr-logs/`. For build errors it prints the `copr-log` and `mock-chain` commands to look closer. `--wait` polls until nothing is building (run it in the background). See "COPR build failures". |
 | `copr-log CRATE -r CHROOT --project P [--grep RE \| --tail N] [--errors N]` | Read-only. Fetch the log of the newest build of the package's current version in that chroot (a running build's live log too) and summarize it: missing BuildRequires, error lines, and warnings grouped, each known one explained (see "Reading a build log"). `--grep` and `--tail` print log lines instead. |
+| `sidetag CRATE…\|--all [--target rawhide] [--new] [--wait] [--bugs N,N] [-n]` | Build a chain of packages in Koji on one side-tag, stage by stage (`order`'s stages), so later packages build against earlier ones and no half-finished Rawhide update exists while the chain runs. Needs the update in each package's own dist-git repository first (`dist-git --push`, then merge or push the branch): Koji will not clone a fork. Reuses a side-tag of yours for the target's build tag; `--new` asks Koji for another. `--wait` waits for each stage's builds and for a repository current with the tag before the next. Ends with the `bodhi updates new --from-tag` command that turns the tag into one update, naming the Bugzilla tickets it closes. See "Side-tag builds". |
 | `tmt CRATE…\|--all --project P [-r CHROOT] [--host] [-n]` | Run the package's generated tmt tests (see "tmt tests") in a container of that Fedora release (default `fedora-rawhide-x86_64`), with the COPR project's repository enabled, as Fedora CI will run them in dist-git. Needs `tmt` with container provisioning (`dnf install tmt+provision-container`) and podman. Inside a toolbox container it refuses to run (podman there corrupts the shared container storage); `--host` instead runs the tests on the host in a throw-away container via `flatpak-spawn` (see "tmt tests"). |
 | `review CRATE…\|--all [-r CHROOT] [--localrepo DIR]` | Run `fedora-review` on each package, in dependency order, rebuilding it in mock. Local dependencies are taken from the `mock-chain` results and passed with `-L`, so run `mock-chain` first with the same chroot. Prints failed checks: `[~]` for ones known to be expected for rust2rpm specs, `[!]` for the rest, and how many items need a manual check. Fails when a `[!]` remains. Work directory: `~/.cache/rust-packaging-tools/review/<chroot>/<crate>/`. |
 | `adopt CRATE…\|--all [--branch B] [--mark-only] [-n]` | For packages that are in Fedora (`--all`: those whose package exists in dist-git): take over the dist-git packaging (`rust2rpm.toml`, patches, hand-made `fix-metadata.diff`) at the branch's current commit, regenerate at the newer of Fedora's and the local version, and write `dist-git.toml`. The earlier configuration moves to `.rust-deps-backup/`. With `--mark-only` (or when dist-git has no `rust2rpm.toml`), keep the local packaging and only write `dist-git.toml`. See "Packages that are in Fedora". |
@@ -526,7 +527,9 @@ lands, so `review-status` and `review-plan` follow the ticket from then on.
 
 Build the packages of a chain in the stages that `order` prints; before
 building a stage, wait until the previous stage is in the buildroot
-(`koji wait-repo --target rawhide --build <nvr>`). For other releases, request
+(`koji wait-repo --target rawhide --build <nvr>`). For an update of packages
+that are already in Fedora, build the chain on a side-tag instead and let it
+become one Bodhi update: `$T sidetag` ("Side-tag builds"). For other releases, request
 branches, build there and create Bodhi updates. Close the review ticket with
 resolution `NEXTRELEASE` once the package is built (or let Bodhi close it), and
 add the package to release monitoring.
@@ -604,6 +607,48 @@ A request that was granted before that mark existed needs no re-running of
 `request-repo`: `dist-git`, `review-plan` and `review-status` ask dist-git once,
 and write the mark themselves when the repository is there. A package with no
 review filed here is never claimed by a dist-git repository of the same name.
+
+## Side-tag builds
+
+A chain of packages that must move together (a multi-build update) is built on
+a Koji side-tag, not for `rawhide` directly: each stage builds against the
+side-tag's own repository, and nothing reaches the archive until one update is
+created from the tag.  `sidetag` does the staging and the waiting:
+
+```bash
+$T dist-git --push a b                     # the pull requests (merge them, or push the branches)
+$T sidetag a b -n                          # the plan: the tag, the stages, the build URLs
+$T sidetag a b --wait                      # create/reuse the tag and build it
+bodhi updates new --from-tag <tag> --type enhancement --notes '…'
+```
+
+- It builds from a commit in the package's **own** dist-git repository: Koji
+  rejects a fork URL (`SCM … is not allowed`), so the update must already be
+  there — its pull request merged, or the branch pushed:
+  `git -C <checkout> push origin <branch>`.  `sidetag -n` names the branch and
+  commit it would build, and says what dist-git has when the version differs.
+  A partial chain is refused too — its later packages would build against the
+  old versions of the earlier ones.
+- The tag is created from the build tag of `--target` (`rawhide` → `f46-build`)
+  and used as its own build target.  `sidetag` reuses a side-tag of yours for
+  that base tag; `--new` asks Koji for another.  Creating a tag and starting
+  builds are public actions: run `-n` and show the plan first.
+- Without `--wait` it only submits.  Watch with `koji watch-task <id>`, see
+  what is in the tag with `koji list-tagged <tag>`, and run the next stage
+  when the earlier one is in the tag's repository.
+- The printed `bodhi` command names the Bugzilla tickets the update closes, so
+  Bodhi closes them when it reaches stable: each package's review ticket while
+  it is still open, and the open `rust-<crate>-<version> is available`
+  release-tracking bugs whose version this update reaches (an older one is
+  fixed here, a newer one is not).  `--bugs N,N` adds ones Bugzilla cannot
+  tell us about.
+- After the builds: create the update with the printed `bodhi` command, and
+  merge the pull requests once their CI passes.  Bodhi removes the side-tag
+  itself when the update is pushed; `koji list-sidetags --mine` shows what is
+  still around.
+
+A package whose review is still open has no dist-git commit to build from:
+those go through COPR and the review flow, not a side-tag.
 
 ## tmt tests
 
