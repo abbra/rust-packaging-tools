@@ -188,6 +188,9 @@ def update_files(pkg: packages.LocalPackage) -> tuple[dict[str, Path], list[Path
     for rel in TMT_FILES:
         if (pkg.dir / rel).exists():
             repo[rel] = pkg.dir / rel
+    if (pkg.dir / config.PACKIT_FILE).exists():
+        # 'packit' generates it: the chain's releases go through one side-tag
+        repo[config.PACKIT_FILE] = pkg.dir / config.PACKIT_FILE
     tests = pkg.dir / "tests" / "rust-deps"
     for f in sorted(tests.iterdir()) if tests.is_dir() else []:
         repo[f"tests/rust-deps/{f.name}"] = f

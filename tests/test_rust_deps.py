@@ -1509,6 +1509,115 @@ def test_a_finished_review_is_not_re_posted(tmp_path, monkeypatch):
     assert "post the new URLs" not in next_step
 
 
+# ─── Packit sidetag groups ───────────────────────────────────────────────────
+
+def packit_args(root: Path, **kw):
+    base = dict(root=root, crates=[], all=True, fas="abbra", allow_pr_author=[], dry_run=False)
+    return argparse.Namespace(**{**base, **kw})
+
+
+def test_packit_chains_one_group_per_dependency_component(tmp_path, monkeypatch):
+    """A chain is one group named for its top; a package nobody needs is no group."""
+    for crate in ("leaf", "mid", "top", "alone"):
+        make_package(tmp_path, crate, f"rust-{crate}")
+    stub_buildrequires(monkeypatch, {
+        "mid": ["crate(leaf) >= 0.1"],
+        "top": ["crate(mid) >= 0.1"],
+    })
+    pkgs = list(rd.packages.local_packages(tmp_path).values())
+    comps = rd.packit.components(rd.packit.dep_edges(pkgs, tmp_path))
+    assert [sorted(c) for c in comps] == [["leaf", "mid", "top"]]
+
+
+def test_packit_shared_library_merges_the_chains(tmp_path, monkeypatch, capsys):
+    """One .packit.yaml carries one sidetag_group, so two consumers of one provider
+    become one group — and the command says what that costs."""
+    for crate in ("shared", "a", "b"):
+        make_package(tmp_path, crate, f"rust-{crate}")
+    stub_buildrequires(monkeypatch, {"a": ["crate(shared) >= 0.1"], "b": ["crate(shared) >= 0.1"]})
+    pkgs = list(rd.packages.local_packages(tmp_path).values())
+    deps = rd.packit.dep_edges(pkgs, tmp_path)
+    assert [sorted(c) for c in rd.packit.components(deps)] == [["a", "b", "shared"]]
+    rd.packit.cmd_packit(packit_args(tmp_path))
+    err = capsys.readouterr().err
+    assert "2 unrelated tops" in err and "koji-tag --all-branches" in err
+    # exactly one update for the group, filed by one of its tops; the other top's
+    # build still joins the same tag
+    files = {
+        c: yaml.safe_load((tmp_path / c / ".packit.yaml").read_text())["jobs"]
+        for c in ("shared", "a", "b")
+    }
+    assert [j["job"] for j in files["shared"]] == ["koji_build"]
+    assert sorted(len(j) for j in files.values()) == [1, 1, 2]
+    assert sum(1 for j in files.values() for k in j if k["job"] == "bodhi_update") == 1
+    top = next(j for j in files["a"] + files["b"] if j["job"] == "bodhi_update")
+    assert top["dependencies"] == ["rust-a", "rust-shared"] or top["dependencies"] == [
+        "rust-b",
+        "rust-shared",
+    ]
+
+
+def test_packit_config_builds_the_chain_in_dependency_order(tmp_path, monkeypatch, capsys):
+    """Providers drive a member's trigger and are its dependencies; the top alone
+    files the update, once every other member's build is in the tag."""
+    for crate in ("leaf", "mid", "top"):
+        make_package(tmp_path, crate, f"rust-{crate}")
+    stub_buildrequires(monkeypatch, {
+        "leaf": ["crate(serde) >= 1.0"],  # Fedora's own: not part of the group
+        "mid": ["crate(leaf) >= 0.1"],
+        "top": ["crate(mid) >= 0.1", "crate(leaf) >= 0.1"],
+    })
+    pkgs = list(rd.packages.local_packages(tmp_path).values())
+    rd.packit.cmd_packit(packit_args(tmp_path))
+    jobs = {
+        c: yaml.safe_load((tmp_path / c / ".packit.yaml").read_text())["jobs"]
+        for c in ("leaf", "mid", "top")
+    }
+    assert [len(j) for j in (jobs["leaf"], jobs["mid"], jobs["top"])] == [1, 1, 2]
+    leaf, mid, top = (j[0] for j in (jobs["leaf"], jobs["mid"], jobs["top"]))
+    assert all(j.get("job") == "koji_build" for j in (leaf, mid, top))
+    assert leaf["sidetag_group"] == mid["sidetag_group"] == top["sidetag_group"] == "rust-top-updates"
+    assert leaf["trigger"] == "commit"  # nothing in the group must come first
+    assert mid["trigger"] == "commit | koji_build"  # build when its provider is tagged
+    assert mid["dependencies"] == ["rust-leaf"] and mid["dependents"] == ["rust-top"]
+    assert top["dependencies"] == ["rust-leaf", "rust-mid"]  # not serde: Fedora has it
+    assert all(j["dist_git_branches"] == ["fedora-all"] for j in (leaf, mid, top))
+    assert all(j["allowed_pr_authors"] == ["abbra"] for j in (leaf, mid, top))
+    assert jobs["top"][1] == {
+        "job": "bodhi_update", "trigger": "koji_build", "sidetag_group": "rust-top-updates",
+        "dependencies": ["rust-leaf", "rust-mid"], "dist_git_branches": ["fedora-all"],
+    }
+    assert "unrelated tops" not in capsys.readouterr().err  # one top: no warning
+
+    # re-running is a no-op: our own file is regenerated, not kept and not doubled
+    before = (tmp_path / "top" / ".packit.yaml").read_text()
+    rd.packit.cmd_packit(packit_args(tmp_path))
+    assert (tmp_path / "top" / ".packit.yaml").read_text() == before
+
+
+def test_packit_leaves_someone_elses_config_alone(tmp_path, monkeypatch, capsys):
+    """A .packit.yaml that is not ours (pull_from_upstream, hand-written jobs) is
+    not ours to overwrite."""
+    for crate in ("a", "b"):
+        d = make_package(tmp_path, crate, f"rust-{crate}")
+        if crate == "a":
+            (d / ".packit.yaml").write_text("jobs:\n  - job: koji_build\n")
+    stub_buildrequires(monkeypatch, {"a": ["crate(b) >= 0.1"]})
+    rd.packit.cmd_packit(packit_args(tmp_path))
+    assert (tmp_path / "a" / ".packit.yaml").read_text() == "jobs:\n  - job: koji_build\n"
+    assert "not ours to rewrite" in capsys.readouterr().err
+    assert (tmp_path / "b" / ".packit.yaml").exists()  # the other member is still set up
+
+
+def test_packit_needs_the_account_name(tmp_path, monkeypatch):
+    """allowed_pr_authors is per person: without it merged PRs would build nothing."""
+    for crate in ("a", "b"):
+        make_package(tmp_path, crate, f"rust-{crate}")
+    stub_buildrequires(monkeypatch, {"a": ["crate(b) >= 0.1"]})
+    monkeypatch.delenv("RUST_DEPS_FAS", raising=False)
+    with pytest.raises(SystemExit):
+        rd.packit.cmd_packit(packit_args(tmp_path, fas=None))
+
 # ─── Koji side-tags ──────────────────────────────────────────────────────────
 
 def test_anon_git_url_rewrites_every_remote_form():

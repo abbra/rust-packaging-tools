@@ -608,6 +608,46 @@ A request that was granted before that mark existed needs no re-running of
 and write the mark themselves when the repository is there. A package with no
 review filed here is never claimed by a dist-git repository of the same name.
 
+## Releasing a chain with Packit
+
+`packit` writes each member of a chain its own `.packit.yaml`, so that a later
+release of the chain is built into one Koji side-tag and filed as one Bodhi
+update without anyone staging it: Packit reacts to what is *merged* in dist-git,
+builds each member in dependency order (`dependencies`/`dependents`), and the
+chain's top package files the update when every build is in the tag.
+
+```bash
+$T packit --all --fas <fas> -n     # the groups and the files, for review
+$T packit jsonschema --fas <fas>   # write them (only for the chain you name)
+$T dist-git --push jsonschema…     # carries .packit.yaml in, like the tmt files
+```
+
+- The group is the connected component of the packages' build dependencies
+  (`order`'s graph) with two or more members, named `<top>-updates`; a package
+  nothing here needs is left alone.  Members are joined by *shared* providers
+  too: one file carries one `sidetag_group`, so two consumers of one library
+  become one group, and the command says so — naming the chain instead of
+  `--all` keeps the shared library out.  Releasing one chain of a merged group
+  alone is what `/packit koji-tag --all-branches` in a pull request is for: it
+  tags the other members' current builds into the side-tag.
+- `--fas` (or `RUST_DEPS_FAS`) is required: `allowed_pr_authors`/`allowed_committers`
+  default to Packit only, so without them nothing you merge would build.
+  `--allow-pr-author` adds a co-maintainer.  A `.packit.yaml` that is not ours
+  (no rust-deps header — `pull_from_upstream`, hand-written jobs) is never
+  overwritten; the message says how to add the keys by hand.
+- Packit does not test your pull requests as a group: Fedora CI scratch-builds
+  one repository against current Fedora, so a consumer's PR is red until its
+  provider lands.  `$T sidetag` remains the way to check a chain before
+  anything merges, and to build a group you are not releasing (a branch, not a
+  merged commit).
+- Before relying on it, check one thing in a canary repository: a package can
+  have its own Packit config *and* Fedora CI's default one, and whether your
+  own file replaces the default PR checks is not something this tool can tell
+  you.  Put the file in one low-risk member, merge it, open a throwaway pull
+  request, and compare its checks with a package that has no config.  If the
+  standard checks are gone, keep the config out of Rawhide or add the `tests`
+  job yourself.
+
 ## Side-tag builds
 
 A chain of packages that must move together (a multi-build update) is built on

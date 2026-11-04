@@ -18,6 +18,7 @@ from . import coprlogs
 from . import distgit
 from . import doctor
 from . import edits
+from . import packit
 from . import pkginit
 from . import regen
 from . import resolver
@@ -319,6 +320,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("-n", "--dry-run", action="store_true")
     sp.set_defaults(func=sidetag.cmd_sidetag)
+
+    sp = sub.add_parser(
+        "packit",
+        help="write each package's .packit.yaml so its chain is released as one "
+        "Bodhi update through a Koji side-tag",
+    )
+    with_sel(sp)
+    sp.add_argument("--fas", help="your Fedora account name (default: $RUST_DEPS_FAS)")
+    sp.add_argument(
+        "--allow-pr-author",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="also let this account's merged pull requests build/release (repeatable)",
+    )
+    sp.add_argument("-n", "--dry-run", action="store_true")
+    sp.set_defaults(func=packit.cmd_packit)
 
     sp = sub.add_parser(
         "copr-log",
