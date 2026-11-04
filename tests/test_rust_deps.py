@@ -1509,6 +1509,15 @@ def test_a_finished_review_is_not_re_posted(tmp_path, monkeypatch):
     assert "post the new URLs" not in next_step
 
 
+def test_ssh_fork_url_of_an_https_fork():
+    """'fedpkg fork' makes an https remote; dist-git cannot authenticate one
+    non-interactively, so the push falls back to the ssh form of the same fork."""
+    f = rd.distgit.ssh_fork_url
+    assert f("https://src.fedoraproject.org/forks/abbra/rpms/rust-a.git") == \
+        "ssh://abbra@pkgs.fedoraproject.org/forks/abbra/rpms/rust-a.git"
+    assert f("https://src.fedoraproject.org/rpms/rust-a.git") is None  # not a fork: say what to fix
+
+
 # ─── CLI wiring ──────────────────────────────────────────────────────────────
 
 def run_cli(monkeypatch, *argv):
