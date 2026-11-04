@@ -155,7 +155,7 @@ def adopt(
 
 
 DIST_GIT_ENV = "RUST_DEPS_DIST_GIT"  # where dist-git checkouts for updates live
-UPDATE_STATE = "dist-git-update.json"  # {"checkout", "branch", "base", "version", "pushed", "pr_url"}
+UPDATE_STATE = "dist-git-update.json"  # {"checkout", "branch", "base", "first", "version", "pushed", "pr_url"}
 TMT_FILES = (".fmf/version", "plans/rust-deps.fmf")
 
 
@@ -261,7 +261,7 @@ def prepare_update(
 ) -> bool:
     """A local commit in a dist-git checkout that puts the local packaging into the Fedora
     repository: on the branch it was adopted from for an adopted package, on rawhide of the
-    empty repository that was just requested for a new one; 'branch' names another."""
+    repository that was just requested for a new one; 'branch' names another."""
     dg = pkg.dist_git or {}
     requested = not dg and reviewrequest.repo_requested(pkg)
     if not dg and not requested:
@@ -286,7 +286,7 @@ def prepare_update(
         util.info(
             f"   would put the local packaging in {checkout}: on"
             + (
-                " rawhide, which the request left empty"
+                " rawhide, the repository our request created"
                 if requested
                 else f" update-{pkg.version} from origin/{branch}"
             )
@@ -297,14 +297,24 @@ def prepare_update(
     ).stdout.strip()
     local_branch = branch if requested else f"update-{pkg.version}"
     if requested:
-        # the repository the request created is empty: rawhide is ours to write
-        if head:
+        # 'fedpkg request-repo' bootstraps the new repository with a README commit;
+        # a branch without a spec in it is still ours to write.
+        existing = (
+            [
+                f
+                for f in git(checkout, "ls-tree", "-r", "--name-only", head).stdout.split()
+                if f.endswith(".spec")
+            ]
+            if head
+            else []
+        )
+        if existing:
             util.action(
-                f"{pkg.crate}: {name} already has {branch}; run 'adopt {pkg.crate}' to take"
-                " its packaging over first"
+                f"{pkg.crate}: {name} already has {branch} ({existing[0]}); run"
+                f" 'adopt {pkg.crate}' to take its packaging over first"
             )
             return False
-        start = []
+        start = [head] if head else []
     else:
         if branch != adopted:
             # the recorded commit is on another branch: nothing to compare with
@@ -385,6 +395,7 @@ def prepare_update(
         "branch": local_branch,
         "target": branch,
         "base": head,
+        "first": requested,  # this commit is the package's first: push the branch itself
         "version": pkg.version,
         "lookaside": [f.name for f in lookaside],
         "pushed": False,
@@ -416,7 +427,7 @@ def push_update(pkg: packages.LocalPackage) -> bool:
         return False
     state = json.loads(f.read_text())
     checkout = Path(state["checkout"])
-    if not state["base"]:
+    if state.get("first"):
         # the repository our request created: the first push is rawhide itself, no fork
         if state["lookaside"]:
             res = util.run(
@@ -604,7 +615,7 @@ def cmd_dist_git(args) -> None:
         util.die(f"say where the dist-git checkouts go: --dir DIR, or ${DIST_GIT_ENV}")
     pkgs = packages.select(args.root, args.crates, args.all)
     if args.all:
-        # adopted packages, and the empty repository a request created
+        # adopted packages, and the repository a request created
         pkgs = [
             p
             for p in pkgs
