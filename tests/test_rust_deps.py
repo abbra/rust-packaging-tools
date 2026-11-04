@@ -1370,9 +1370,10 @@ def test_an_unrequested_package_is_not_claimed_by_a_namesake(tmp_path, monkeypat
 
 
 def test_a_requested_repository_is_imported_into_dist_git(tmp_path, monkeypatch, capsys):
-    """After the request is granted, 'dist-git' clones the empty repository and commits
-    the local packaging on rawhide; 'dist-git --push' pushes rawhide to origin itself,
-    without a fork, and records the package as adopted."""
+    """After the request is granted, 'dist-git' clones the repository (which
+    'fedpkg request-repo' bootstrapped with a README commit) and commits the
+    local packaging on rawhide; 'dist-git --push' pushes rawhide to origin
+    itself, without a fork, and records the package as adopted."""
     import subprocess
     def sh(*a, cwd):
         return subprocess.run(a, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
@@ -1382,8 +1383,15 @@ def test_a_requested_repository_is_imported_into_dist_git(tmp_path, monkeypatch,
                      ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")):
         monkeypatch.setenv(var, val)
     (tmp_path / "rpms").mkdir()
-    subprocess.run(["git", "init", "-q", "--bare", "-b", "rawhide",
-                    str(tmp_path / "rpms" / "rust-zmij.git")], check=True)
+    bare = str(tmp_path / "rpms" / "rust-zmij.git")
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "rawhide", bare], check=True)
+    # what 'fedpkg request-repo' leaves behind: one 'Added the README' commit
+    seed = str(tmp_path / "seed")
+    subprocess.run(["git", "clone", "-q", bare, seed], check=True)
+    Path(seed, "README.md").write_text("rust-zmij\n")
+    subprocess.run(["git", "-C", seed, "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", seed, "commit", "-q", "-m", "Added the README"], check=True)
+    subprocess.run(["git", "-C", seed, "push", "-q", "origin", "rawhide"], check=True)
     d = make_package(tmp_path, "zmij", "rust-zmij", "1.0.23")
     (d / rd.reviewrequest.REPO_REQUEST).write_text('{"bug": 2401234, "requested": "2026-10-27"}\n')
     top = tmp_path / "fedora"
@@ -1391,9 +1399,9 @@ def test_a_requested_repository_is_imported_into_dist_git(tmp_path, monkeypatch,
     pkg = rd.packages.local_packages(tmp_path)["zmij"]
     # a dry run describes the import without cloning
     assert rd.distgit.prepare_update(pkg, top, None, True) is True
-    assert "rawhide, which the request left empty" in capsys.readouterr().out
+    assert "rawhide, the repository our request created" in capsys.readouterr().out
     assert not (top / "rust-zmij").exists()
-    # the real import: clone the empty repository, commit the packaging on rawhide
+    # the import: the README bootstrap commit is the base, the packaging lands on it
     monkeypatch.setattr(rd.distgit, "update_files", lambda pkg: ({pkg.spec.name: pkg.spec}, []))
     assert rd.distgit.prepare_update(pkg, top, None, False) is True
     assert sh("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=top / "rust-zmij") == "rawhide"

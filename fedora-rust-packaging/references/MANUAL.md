@@ -511,7 +511,8 @@ After approval (`fedora-review+`, ticket assigned to the reviewer):
 rust-deps request-repo <crate>                # runs 'fedpkg request-repo <rpm> <bug>'
 # (needs a Forgejo token: fedpkg set-forgejo-token)
 rust-deps dist-git <crate>                    # once the fedora-scm-requests ticket is closed:
-                                              # clones the empty repository and commits the
+                                              # clones the new repository (fedpkg
+                                              # bootstraps it with a README commit) and commits the
                                               # packaging (spec, rust2rpm.toml, tmt files) on rawhide
 rust-deps dist-git --push <crate>             # uploads the sources, pushes rawhide to the
                                               # repository itself (a new repository needs no fork,
@@ -590,7 +591,8 @@ rust-deps dist-git --push zmij           # fork, upload sources, push; prints th
 
 A package whose repository `request-repo` created (marked in `repo-request.json`)
 has nothing to adopt and no pull request to open: the same `dist-git` clones the
-empty repository, commits the spec, `rust2rpm.toml`, patches and tmt files on
+repository `fedpkg request-repo` created (it is bootstrapped with an "Added the
+README" commit), commits the spec, `rust2rpm.toml`, patches and tmt files on
 rawhide (`New package: <rpm> <version>`), and `--push` uploads the sources and
 pushes rawhide to the repository itself — a package you are importing needs no
 fork. The push records the package in `dist-git.toml` (in Fedora), so its
