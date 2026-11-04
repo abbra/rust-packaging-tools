@@ -26,6 +26,7 @@ OPTIONAL_TOOLS = {
     "copr-cli": "copr-cli (for copr)",
     "fedpkg": "fedpkg (for dist-git)",
     "fedora-review": "fedora-review (for review)",
+    "koji": "koji (for sidetag)",
 }
 
 

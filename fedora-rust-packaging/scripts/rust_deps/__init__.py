@@ -42,6 +42,7 @@ from . import (
     reviewplan,
     reviewrequest,
     reviewstatus,
+    sidetag,
     srpm,
     status,
     targets,

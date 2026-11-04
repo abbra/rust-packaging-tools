@@ -1509,6 +1509,145 @@ def test_a_finished_review_is_not_re_posted(tmp_path, monkeypatch):
     assert "post the new URLs" not in next_step
 
 
+# ─── Koji side-tags ──────────────────────────────────────────────────────────
+
+def test_anon_git_url_rewrites_every_remote_form():
+    f = rd.sidetag.anon_git_url
+    assert f("ssh://abbra@pkgs.fedoraproject.org/forks/abbra/rpms/rust-a.git") == \
+        "https://src.fedoraproject.org/forks/abbra/rpms/rust-a.git"
+    assert f("git@pkgs.fedoraproject.org:rpms/rust-a.git") == \
+        "https://src.fedoraproject.org/rpms/rust-a.git"
+    # already anonymous: unchanged
+    assert f("https://src.fedoraproject.org/rpms/rust-a.git") == \
+        "https://src.fedoraproject.org/rpms/rust-a.git"
+
+
+def test_sidetag_needs_a_pushed_current_update(tmp_path, monkeypatch, capsys):
+    """A side-tag build tests what the pull request has: the pushed branch at its tip."""
+    root = tmp_path / "root"
+    root.mkdir()
+    d = make_package(root, "zmij", "rust-zmij", "1.0.23")
+    pkg = rd.packages.local_packages(root)["zmij"]
+
+    def actions():
+        return capsys.readouterr().err
+
+    # no dist-git-update.json at all
+    assert rd.sidetag.build_url(pkg) is None
+    assert "'dist-git zmij' first" in actions()
+
+    # prepared but not pushed
+    (d / rd.distgit.UPDATE_STATE).write_text(json.dumps({"checkout": "/x", "branch": "update-1.0.23", "version": "1.0.23", "pushed": False}))
+    assert rd.sidetag.build_url(pkg) is None
+    assert "not pushed" in actions()
+
+    # pushed, but an older version than the package here
+    (d / rd.distgit.UPDATE_STATE).write_text(json.dumps({"checkout": "/x", "branch": "update-1.0.22", "version": "1.0.22", "pushed": True}))
+    assert rd.sidetag.build_url(pkg) is None
+    assert "'dist-git zmij' again" in actions()
+
+
+def test_sidetag_builds_only_from_the_package_repository(tmp_path, monkeypatch, capsys):
+    """Koji rejects a fork URL, so the update has to be in dist-git: the branch pushed
+    there, with the version we are building."""
+    import subprocess
+    def sh(*a, cwd):
+        subprocess.run(a, cwd=cwd, check=True, capture_output=True)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    sh("git", "init", "-q", "--bare", "-b", "rawhide", cwd=str(origin))
+    checkout = tmp_path / "rust-zmij"
+    sh("git", "clone", "-q", str(origin), checkout.name, cwd=tmp_path)
+    spec = "%global crate zmij\nName: rust-zmij\nVersion:        1.0.21\n"
+    (checkout / "rust-zmij.spec").write_text(spec)
+    sh("git", "add", "rust-zmij.spec", cwd=checkout)
+    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one", cwd=checkout)
+    sh("git", "push", "-q", "origin", "rawhide", cwd=checkout)
+    sh("git", "checkout", "-q", "-b", "update-1.0.23", cwd=checkout)
+    (checkout / "rust-zmij.spec").write_text(spec.replace("1.0.21", "1.0.23"))
+    sh("git", "commit", "-q", "-am", "two", cwd=checkout)
+
+    root = tmp_path / "root"
+    root.mkdir()
+    make_package(root, "zmij", "rust-zmij", "1.0.23")
+    pkg = rd.packages.local_packages(root)["zmij"]
+    state = {"checkout": str(checkout), "branch": "update-1.0.23", "target": "rawhide",
+             "version": "1.0.23", "pushed": True, "fork": "origin"}
+    (pkg.dir / rd.distgit.UPDATE_STATE).write_text(json.dumps(state))
+
+    def url():
+        return rd.sidetag.build_url(pkg)
+
+    # nothing in the package repository yet: say what dist-git has and how to get ours there
+    assert url() is None
+    err = capsys.readouterr().err
+    assert "rawhide would not test this packaging: it has rust-zmij-1.0.21, not 1.0.23" in err
+    assert "push origin update-1.0.23:refs/heads/update-1.0.23" in err
+
+    # pushed under its own name: built from the package's own repository
+    sh("git", "push", "-q", "origin", "update-1.0.23", cwd=checkout)
+    remote = subprocess.run(["git", "-C", str(checkout), "remote", "get-url", "origin"],
+                            capture_output=True, text=True).stdout.strip()
+    sha = subprocess.run(["git", "ls-remote", str(origin), "refs/heads/update-1.0.23"],
+                         capture_output=True, text=True).stdout.split()[0]
+    assert url() == f"git+{remote}#{sha}"
+
+    # rawhide already carries the new version (the pull request merged): build that
+    sh("git", "push", "-q", "origin", "update-1.0.23:rawhide", cwd=checkout)
+    sh("git", "push", "-q", "origin", ":refs/heads/update-1.0.23", cwd=checkout)
+    merged = subprocess.run(["git", "ls-remote", str(origin), "refs/heads/rawhide"],
+                            capture_output=True, text=True).stdout.split()[0]
+    assert url() == f"git+{remote}#{merged}"
+
+    # a packaging-only change (same Version, %autorelease bumps the release): the merged
+    # rawhide would test the old packaging, so it is refused until it is in dist-git
+    (pkg.dir / "rust-zmij.spec").write_text(spec.replace("1.0.21", "1.0.23") + "%exclude x\n")
+    assert url() is None
+    assert "a packaging change is not in it" in capsys.readouterr().err
+    (checkout / "rust-zmij.spec").write_text(spec.replace("1.0.21", "1.0.23") + "%exclude x\n")
+    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "three", cwd=checkout)
+    sh("git", "push", "-q", "origin", "update-1.0.23:rawhide", cwd=checkout)
+    tip = subprocess.run(["git", "ls-remote", str(origin), "refs/heads/rawhide"],
+                         capture_output=True, text=True).stdout.split()[0]
+    assert url() == f"git+{remote}#{tip}"
+
+
+def test_an_update_names_the_bugs_it_closes(tmp_path, monkeypatch):
+    """Naming the tickets lets Bodhi close them when the update reaches stable: the
+    packages' open review tickets and the open '<rpm> <version> is available' bugs.
+    A closed ticket and a newer upstream version are not named."""
+    root = tmp_path / "root"
+    root.mkdir()
+    d = make_package(root, "zmij", "rust-zmij", "1.0.23")
+    make_package(root, "other", "rust-other", "0.9")
+    pkgs = list(rd.packages.local_packages(root).values())
+    (d / rd.reviewrequest.REQUEST_STATE).write_text(json.dumps({"bug": 2401234}))
+
+    asked = []
+    def rest(path):
+        asked.append(path)
+        if "component=" in path:
+            return {"bugs": [
+                {"id": 111, "summary": "rust-zmij-1.0.21 is available"},
+                {"id": 222, "summary": "rust-zmij-1.0.23 is available"},
+                {"id": 333, "summary": "rust-zmij-1.0.24 is available"},
+                {"id": 444, "summary": "please fix rust-zmij docs"},
+            ]}
+        if "id=2401234" in path:
+            return {"bugs": [{"id": 2401234}]}  # still open
+        return {"bugs": []}
+    monkeypatch.setattr(rd.reviewstatus, "bz_rest", rest)
+    assert rd.sidetag.update_bugs(pkgs) == [111, 222, 2401234]
+    # every search is limited to tickets that are not closed
+    assert all("bug_status=NEW" in q for q in asked)
+
+    # a review ticket already closed is not named
+    monkeypatch.setattr(rd.reviewstatus, "bz_rest", lambda path: {"bugs": []})
+    assert rd.sidetag.update_bugs(pkgs) == []
+
+
 def test_ssh_fork_url_of_an_https_fork():
     """'fedpkg fork' makes an https remote; dist-git cannot authenticate one
     non-interactively, so the push falls back to the ssh form of the same fork."""
@@ -1517,6 +1656,29 @@ def test_ssh_fork_url_of_an_https_fork():
         "ssh://abbra@pkgs.fedoraproject.org/forks/abbra/rpms/rust-a.git"
     assert f("https://src.fedoraproject.org/rpms/rust-a.git") is None  # not a fork: say what to fix
 
+
+def test_a_finished_review_is_not_re_posted(tmp_path, monkeypatch):
+    """An approved ticket keeps its next step (close/import) when the local package is
+    newer: the update goes through dist-git, not through the review."""
+    root = tmp_path / "root"
+    root.mkdir()
+    make_package(root, "zmij", "rust-zmij", "1.0.24")
+    pkg = rd.packages.local_packages(root)["zmij"]
+    bug = {"id": 2401234, "status": "RELEASE_PENDING", "resolution": None,
+           "summary": "Review Request: rust-zmij - pace", "creator": "me@example.com",
+           "assigned_to": "code", "last_change_time": "2026-10-26T18:18:17Z",
+           "flags": [{"name": "fedora-review", "status": "+", "setter": "code"}]}
+    monkeypatch.setattr(rd.reviewstatus, "bz_rest", lambda path: {"bugs": {"2401234": {"comments": [
+        {"creator": "me@example.com", "count": 0, "time": "2026-10-20T06:09:44Z",
+         "text": "SRPM URL: https://copr/rust-zmij-1.0.23-1.fc43.src.rpm"}]}}})
+    monkeypatch.setattr(rd.reviewrequest, "koji_latest_build", lambda rpm: "rust-zmij-1.0.23-2.fc46")
+    monkeypatch.setattr(rd.reviewrequest, "repo_requested", lambda p: True)
+    monkeypatch.setattr(rd.reviewrequest, "spec_query", lambda spec, fmt: "1.0.24-1")
+    next_step = rd.reviewstatus.review_ticket_report(
+        bug, "rust-zmij", 3, tmp_path / "review.txt", "zmij", pkg
+    )
+    assert "close the ticket as NEXTRELEASE" in next_step
+    assert "post the new URLs" not in next_step
 
 # ─── CLI wiring ──────────────────────────────────────────────────────────────
 

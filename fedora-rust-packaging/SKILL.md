@@ -49,7 +49,8 @@ Read them as follows (forms can be combined with `--root <dir>`):
   `trial <crate>`, `srpm --all`, `review --all -r <chroot>`,
   `check-targets --all --project <owner/project>`,
   `copr-status --all --project <owner/project>`, `copr-log <crate> -r <chroot> --project <p>`,
-  `review-status --all`, `review-status --user <login>`, …): run only that
+  `review-status --all`, `review-status --user <login>`,
+  `sidetag <crate>… -n`, …): run only that
   step and report its result.
 - **`--root <dir>`**: the packages root (see Setup).
 - **nothing**: show the user these forms with one example each, and ask what
@@ -307,6 +308,12 @@ crates.io release in build order: it moves upstream sources pinned to the old
 release's commit, regenerates, and runs `trial`. Resolve its `ACTION NEEDED`
 lines, then `srpm`, `check-targets`, and `copr` or `mock-chain`; adopted
 packages go to Fedora with `dist-git`. Use `-n` to see the plan first.
+
+A chain of adopted packages (a consumer and its providers) moves together: with
+`dist-git --push` and the pull requests merged, `$T sidetag <chain> --wait`
+builds the whole chain in one Koji side-tag, stage by stage, and prints the
+`bodhi updates new --from-tag` command that files it as one update ("Side-tag
+builds" in the manual).
 
 ## Packaging inside the upstream repository
 
