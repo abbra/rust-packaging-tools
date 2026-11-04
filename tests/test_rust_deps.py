@@ -1421,6 +1421,30 @@ def test_a_requested_repository_is_imported_into_dist_git(tmp_path, monkeypatch,
     assert "no changes against dist-git" in capsys.readouterr().out
 
 
+def test_a_finished_review_is_not_re_posted(tmp_path, monkeypatch):
+    """An approved ticket keeps its next step (close/import) when the local package is
+    newer: the update goes through dist-git, not through the review."""
+    root = tmp_path / "root"
+    root.mkdir()
+    make_package(root, "zmij", "rust-zmij", "1.0.24")
+    pkg = rd.packages.local_packages(root)["zmij"]
+    bug = {"id": 2401234, "status": "RELEASE_PENDING", "resolution": None,
+           "summary": "Review Request: rust-zmij - pace", "creator": "me@example.com",
+           "assigned_to": "code", "last_change_time": "2026-10-26T18:18:17Z",
+           "flags": [{"name": "fedora-review", "status": "+", "setter": "code"}]}
+    monkeypatch.setattr(rd.reviewstatus, "bz_rest", lambda path: {"bugs": {"2401234": {"comments": [
+        {"creator": "me@example.com", "count": 0, "time": "2026-10-20T06:09:44Z",
+         "text": "SRPM URL: https://copr/rust-zmij-1.0.23-1.fc43.src.rpm"}]}}})
+    monkeypatch.setattr(rd.reviewrequest, "koji_latest_build", lambda rpm: "rust-zmij-1.0.23-2.fc46")
+    monkeypatch.setattr(rd.reviewrequest, "repo_requested", lambda p: True)
+    monkeypatch.setattr(rd.reviewrequest, "spec_query", lambda spec, fmt: "1.0.24-1")
+    next_step = rd.reviewstatus.review_ticket_report(
+        bug, "rust-zmij", 3, tmp_path / "review.txt", "zmij", pkg
+    )
+    assert "close the ticket as NEXTRELEASE" in next_step
+    assert "post the new URLs" not in next_step
+
+
 # ─── CLI wiring ──────────────────────────────────────────────────────────────
 
 def run_cli(monkeypatch, *argv):
