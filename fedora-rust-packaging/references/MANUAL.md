@@ -478,7 +478,9 @@ Steps:
    Such finished reviews (approved, RELEASE_PENDING or CLOSED) need no more
    work on their comments or review bot results; `review-status` skips the
    bot for them and only shows comments that are new since the last check.
-   Remarks made with the approval go into later dist-git updates.
+   What it does print is the reviewer's `Notes:` section of the approval
+   (quoted with a link to the comment it came from); those remarks go into
+   later dist-git updates.
 6. If nobody picks the ticket up, ask on the
    [Package Review Swaps](https://discussion.fedoraproject.org/c/workflows/pkg-review-swap/91)
    category or the devel list.
