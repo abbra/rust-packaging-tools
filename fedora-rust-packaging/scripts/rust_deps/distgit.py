@@ -413,6 +413,37 @@ def prepare_update(
     return True
 
 
+def ssh_fork_url(url: str) -> str | None:
+    """The ssh form of a fork's https URL; its path names the FAS account."""
+    m = re.match(r"https?://[^/]+/forks/([^/]+)/(.+)$", url)
+    return f"ssh://{m.group(1)}@pkgs.fedoraproject.org/forks/{m.group(1)}/{m.group(2)}" if m else None
+
+
+def push_branch(checkout: Path, remote: str, branch: str) -> None:
+    """Push the update branch to the fork; an https remote that cannot authenticate
+    is retried over ssh.
+
+    'fedpkg fork' makes an https remote, and dist-git's https git has no
+    non-interactive credential by default (git-credential-oauth needs a
+    per-host OAuth client id that dist-git does not publish); pkgs.
+    fedoraproject.org serves the same repository over ssh with the FAS key.
+    """
+    res = git(checkout, "push", "-q", "-f", remote, branch, check=False)
+    if not res.returncode:
+        return
+    url = git(checkout, "remote", "get-url", remote).stdout.strip()
+    if not (ssh := ssh_fork_url(url)):
+        util.die(
+            f"git push -f {remote} {branch} failed in {checkout}:\n{res.stderr}\n"
+            f"if {remote} is a dist-git remote, its https URL cannot authenticate: "
+            f"git -C {checkout} remote set-url {remote} ssh://<fas>@pkgs.fedoraproject.org/<path>"
+        )
+    util.warn(f"{remote} over https did not authenticate; trying {ssh}")
+    if git(checkout, "push", "-q", "-f", ssh, branch, check=False).returncode:
+        util.die(f"git push -f {remote} {branch} failed in {checkout}:\n{res.stderr}")
+    git(checkout, "remote", "set-url", remote, ssh)
+
+
 def push_update(pkg: packages.LocalPackage) -> bool:
     """Fork (once), upload the sources to the lookaside cache, push the branch to the fork;
     for a repository the request just created, push rawhide to origin."""
@@ -482,7 +513,7 @@ def push_update(pkg: packages.LocalPackage) -> bool:
         return False
     if git(checkout, "status", "--porcelain", check=False).stdout.strip():
         git(checkout, "commit", "-q", "--amend", "--no-edit", "-a")
-    git(checkout, "push", "-q", "-f", fork, state["branch"])
+    push_branch(checkout, fork, state["branch"])
     user = re.search(r"forks/([^/]+)/", git(checkout, "remote", "get-url", fork).stdout)
     url = (
         f"{DIST_GIT}/fork/{user.group(1)}/rpms/{pkg.rpm_name}/diff/{state['target']}..{state['branch']}"
