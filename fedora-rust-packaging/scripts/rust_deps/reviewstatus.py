@@ -263,7 +263,9 @@ def review_ticket_report(
         )
     if bot_problem and flag != "+":
         return bot_problem
-    if outdated:
+    # a newer local package only matters while the review is open; for an approved one
+    # the next step is the repository/import below, and the update is a normal dist-git update
+    if outdated and flag != "+" and bug["status"] != "RELEASE_PENDING":
         return "post the new URLs: copr --wait, then 'review-request --file'"
     if flag == "+" or bug["status"] == "RELEASE_PENDING":
         # RELEASE_PENDING is set by the script that creates the dist-git repository
