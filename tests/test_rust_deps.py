@@ -1676,7 +1676,7 @@ def test_sidetag_builds_only_from_the_package_repository(tmp_path, monkeypatch, 
     sh("git", "push", "-q", "origin", "rawhide", cwd=checkout)
     sh("git", "checkout", "-q", "-b", "update-1.0.23", cwd=checkout)
     (checkout / "rust-zmij.spec").write_text(spec.replace("1.0.21", "1.0.23"))
-    sh("git", "commit", "-q", "-am", "two", cwd=checkout)
+    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "two", cwd=checkout)
 
     root = tmp_path / "root"
     root.mkdir()
